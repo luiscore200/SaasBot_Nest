@@ -14,7 +14,7 @@ export class AuthService {
     private appJwtService: AppJwtService, // Nuestro servicio para gestionar tokens en DB
   ) {}
 
-  async register(registerDto: RegisterAuthDto): Promise<{ token: string }> {
+  async register(registerDto: RegisterAuthDto): Promise<{ token: string,user:any }> {
     const { email, password, name, roleId } = registerDto;
 
     const existingUser = await this.prisma.user.findUnique({ where: { email } });
@@ -37,21 +37,29 @@ export class AuthService {
         name,
         roleId: finalRoleId,
       },
+      include: {
+        role: true, // Incluir la relación Role para obtener el nombre
+      },
     });
 
-    const payload = { email: user.email, sub: user.id, roleId: user.roleId };
+    const payload = { email: user.email, sub: user.id, roleName: user.role.name };
     const token = this.jwtService.sign(payload);
 
     // Guardar el token en la base de datos
     await this.appJwtService.saveToken(user.id, token);
 
-    return { token };
+    return { token,user:{...payload,name:user.name,role:user.role.name}};
   }
 
-  async login(loginDto: LoginAuthDto): Promise<{ token: string }> {
+  async login(loginDto: LoginAuthDto): Promise<{  token: string,user:any  }> {
     const { email, password } = loginDto;
 
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const user = await this.prisma.user.findUnique({
+      where: { email },
+      include: {
+        role: true, // Incluir la relación Role para obtener el nombre
+      },
+    });
     if (!user) {
       throw new UnauthorizedException('Credenciales inválidas.');
     }
@@ -61,13 +69,13 @@ export class AuthService {
       throw new UnauthorizedException('Credenciales inválidas.');
     }
 
-    const payload = { email: user.email, sub: user.id, roleId: user.roleId };
+    const payload = { email: user.email, sub: user.id, roleName: user.role.name };
     const token = this.jwtService.sign(payload);
 
     // Guardar el token en la base de datos (o actualizar si ya existe uno activo)
     await this.appJwtService.saveToken(user.id, token);
 
-    return { token };
+    return { token,user:{...payload,name:user.name,role:user.role.name}};
   }
 
   async validateUser(payload: any): Promise<any> {
@@ -80,9 +88,10 @@ export class AuthService {
     return user;
   }
 
+ 
   private async getDefaultRoleId(): Promise<number | null> {
-      // Implementa la lógica para obtener el ID del rol por defecto, por ejemplo, buscando un rol con nombre 'user'
-      const defaultRole = await this.prisma.role.findUnique({ where: { name: 'USER' } }); // Corregido a 'USER'
-      return defaultRole?.id ?? null;
-  }
+    // Implementa la lógica para obtener el ID del rol por defecto, por ejemplo, buscando un rol con nombre 'user'
+    const defaultRole = await this.prisma.role.findUnique({ where: { name: 'USER' } }); // Corregido a 'USER'
+    return defaultRole?.id ?? null;
+}
 }
