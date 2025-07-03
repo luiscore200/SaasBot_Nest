@@ -38,6 +38,8 @@ import { MongooseModule } from '@nestjs/mongoose';
 
     CommonModule,
 
+    DataModule,
+
      MongooseModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

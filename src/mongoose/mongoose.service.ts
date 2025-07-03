@@ -1,10 +1,9 @@
-// src/common/mongo-orm.service.ts
-import { Injectable } from '@nestjs/common';
+// src/common/mongoose.service.ts
+
 import { Model } from 'mongoose';
 
-@Injectable()
 export class MongoOrmService<T> {
-  constructor(private readonly model: Model<T>) {}
+  constructor(protected readonly model: Model<T>) {}
 
   async create(data: Partial<T>) {
     return new this.model(data).save();

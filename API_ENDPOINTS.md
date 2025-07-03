@@ -7,22 +7,21 @@ http://localhost:3000
 
 ---
 
-## 👥 Users Endpoints
+## 🔑 Authentication Endpoints
 
-### ➕ Create User
+### ➕ Register User
 ```bash
-POST /users
+POST /auth/register
 ```
 
 **Request:**
 ```bash
-curl -X POST http://localhost:3000/users \
+curl -X POST http://localhost:3000/auth/register \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Juan Pérez",
-    "email": "juan.perez@example.com",
-    "password": "123456",
-    "phone": "+34 612 345 678"
+    "email": "newuser@example.com",
+    "password": "securepassword",
+    "name": "New User"
   }'
 ```
 
@@ -30,96 +29,95 @@ curl -X POST http://localhost:3000/users \
 ```json
 {
   "success": true,
-  "message": "User created successfully",
+  "message": "User registered successfully",
   "data": {
-    "id": 1,
-    "name": "Juan Pérez",
-    "email": "juan.perez@example.com",
-    "phone": "+34 612 345 678",
-    "isActive": true,
-    "createdAt": "2024-01-15T10:30:00.000Z",
-    "updatedAt": "2024-01-15T10:30:00.000Z"
+    "id": 2,
+    "email": "newuser@example.com",
+    "name": "New User",
+    "role": {
+      "name": "USER"
+    }
   },
   "statusCode": 201
 }
 ```
 
-### 📋 Get All Users
+### 🚪 Login User
 ```bash
-GET /users
+POST /auth/login
 ```
 
 **Request:**
 ```bash
-curl http://localhost:3000/users
-```
-
-### 🔍 Get User by ID
-```bash
-GET /users/:id
-```
-
-**Request:**
-```bash
-curl http://localhost:3000/users/1
-```
-
-### 📊 Get User Count
-```bash
-GET /users/count
-```
-
-**Request:**
-```bash
-curl http://localhost:3000/users/count
-```
-
-### ✏️ Update User
-```bash
-PATCH /users/:id
-```
-
-**Request:**
-```bash
-curl -X PATCH http://localhost:3000/users/1 \
+curl -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Juan Pérez Updated",
-    "phone": "+34 999 888 777"
+    "email": "existinguser@example.com",
+    "password": "securepassword"
   }'
 ```
 
-### 🗑️ Delete User
-```bash
-DELETE /users/:id
-```
-
-**Request:**
-```bash
-curl -X DELETE http://localhost:3000/users/1
+**Response:**
+```json
+{
+  "success": true,
+  "message": "User logged in successfully",
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "user": {
+      "id": 1,
+      "email": "existinguser@example.com",
+      "name": "Existing User",
+      "role": {
+        "name": "ADMIN"
+      }
+    }
+  },
+  "statusCode": 200
+}
 ```
 
 ---
 
-## 📅 Appointments Endpoints
+## 🏠 Application Endpoints
 
-### ➕ Create Appointment
+### 👋 Get Hello
 ```bash
-POST /appointments
+GET /
 ```
 
 **Request:**
 ```bash
-curl -X POST http://localhost:3000/appointments \
+curl http://localhost:3000/
+```
+
+**Response:**
+```text
+Hello World!
+```
+
+---
+
+## 📄 Schemas Endpoints
+
+### ➕ Create Schema
+```bash
+POST /schemas
+```
+
+**Request:**
+```bash
+curl -X POST http://localhost:3000/schemas \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -d '{
-    "title": "Consulta médica",
-    "description": "Revisión general de salud",
-    "appointmentDate": "2024-12-25T10:00:00.000Z",
-    "duration": 60,
-    "location": "Consultorio 101",
-    "notes": "Traer exámenes previos",
-    "userId": 1
+    "name": "CustomerSchema",
+    "company_id": "company123",
+    "fields": [
+      { "name": "name", "type": "string", "required": true },
+      { "name": "email", "type": "string", "required": true, "unique": true },
+      { "name": "age", "type": "number", "required": false }
+    ]
   }'
 ```
 
@@ -127,164 +125,322 @@ curl -X POST http://localhost:3000/appointments \
 ```json
 {
   "success": true,
-  "message": "Appointment created successfully",
+  "message": "Schema created successfully",
   "data": {
-    "id": 1,
-    "title": "Consulta médica",
-    "description": "Revisión general de salud",
-    "appointmentDate": "2024-12-25T10:00:00.000Z",
-    "duration": 60,
-    "status": "scheduled",
-    "location": "Consultorio 101",
-    "notes": "Traer exámenes previos",
-    "userId": 1,
-    "isActive": true,
-    "createdAt": "2024-01-15T10:30:00.000Z",
-    "updatedAt": "2024-01-15T10:30:00.000Z"
+    "id": "schema123",
+    "name": "CustomerSchema",
+    "company_id": "company123",
+    "fields": [
+      { "name": "name", "type": "string", "required": true },
+      { "name": "email", "type": "string", "required": true, "unique": true },
+      { "name": "age", "type": "number", "required": false }
+    ],
+    "createdAt": "2024-07-17T10:00:00.000Z",
+    "updatedAt": "2024-07-17T10:00:00.000Z"
   },
   "statusCode": 201
 }
 ```
 
-### 📋 Get All Appointments
+### 📋 Get All Schemas by Company
 ```bash
-GET /appointments
-```
-
-**Query Parameters:**
-- `userId` (optional): Filter by user ID
-- `status` (optional): Filter by status
-- `startDate` (optional): Filter from date (ISO format)
-- `endDate` (optional): Filter to date (ISO format)
-- `page` (optional): Page number (default: 1)
-- `limit` (optional): Items per page (default: 10)
-
-**Examples:**
-```bash
-# Get all appointments
-curl http://localhost:3000/appointments
-
-# Get appointments for user 1
-curl http://localhost:3000/appointments?userId=1
-
-# Get scheduled appointments
-curl http://localhost:3000/appointments?status=scheduled
-
-# Get appointments with date range
-curl "http://localhost:3000/appointments?startDate=2024-01-01&endDate=2024-12-31"
-
-# Get with pagination
-curl "http://localhost:3000/appointments?page=1&limit=5"
-```
-
-### 🔍 Get Appointment by ID
-```bash
-GET /appointments/:id
+GET /schemas?company_id=YOUR_COMPANY_ID
 ```
 
 **Request:**
 ```bash
-curl http://localhost:3000/appointments/1
+curl "http://localhost:3000/schemas?company_id=company123" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
-### 👤 Get Appointments by User
-```bash
-GET /appointments/user/:userId
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Schemas retrieved successfully",
+  "data": [
+    {
+      "id": "schema123",
+      "name": "CustomerSchema",
+      "company_id": "company123",
+      "fields": [...],
+      "createdAt": "2024-07-17T10:00:00.000Z",
+      "updatedAt": "2024-07-17T10:00:00.000Z"
+    }
+  ],
+  "statusCode": 200
+}
 ```
 
-**Request:**
+### 🔍 Get Schema by ID
 ```bash
-curl http://localhost:3000/appointments/user/1
-```
-
-### 📊 Get Appointments by Status
-```bash
-GET /appointments/status/:status
-```
-
-**Request:**
-```bash
-curl http://localhost:3000/appointments/status/scheduled
-```
-
-### ⏰ Get Upcoming Appointments
-```bash
-GET /appointments/upcoming
-```
-
-**Request:**
-```bash
-curl http://localhost:3000/appointments/upcoming
-```
-
-### ✏️ Update Appointment
-```bash
-PATCH /appointments/:id
+GET /schemas/:id
 ```
 
 **Request:**
 ```bash
-curl -X PATCH http://localhost:3000/appointments/1 \
+curl http://localhost:3000/schemas/schema123 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Schema retrieved successfully",
+  "data": {
+    "id": "schema123",
+    "name": "CustomerSchema",
+    "company_id": "company123",
+    "fields": [...],
+    "createdAt": "2024-07-17T10:00:00.000Z",
+    "updatedAt": "2024-07-17T10:00:00.000Z"
+  },
+  "statusCode": 200
+}
+```
+
+### ✏️ Update Schema
+```bash
+PATCH /schemas/:id
+```
+
+**Request:**
+```bash
+curl -X PATCH http://localhost:3000/schemas/schema123 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -d '{
-    "title": "Consulta médica actualizada",
-    "duration": 90,
-    "location": "Consultorio 102"
+    "fields": [
+      { "name": "name", "type": "string", "required": true },
+      { "name": "email", "type": "string", "required": true, "unique": true },
+      { "name": "age", "type": "number", "required": false },
+      { "name": "address", "type": "string", "required": false }
+    ]
   }'
 ```
 
-### 🔄 Update Appointment Status
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Schema updated successfully",
+  "data": {
+    "id": "schema123",
+    "name": "CustomerSchema",
+    "company_id": "company123",
+    "fields": [
+      { "name": "name", "type": "string", "required": true },
+      { "name": "email", "type": "string", "required": true, "unique": true },
+      { "name": "age", "type": "number", "required": false },
+      { "name": "address", "type": "string", "required": false }
+    ],
+    "createdAt": "2024-07-17T10:00:00.000Z",
+    "updatedAt": "2024-07-17T10:05:00.000Z"
+  },
+  "statusCode": 200
+}
+```
+
+### 🗑️ Delete Schema
 ```bash
-PATCH /appointments/:id/status
+DELETE /schemas/:id
 ```
 
 **Request:**
 ```bash
-curl -X PATCH http://localhost:3000/appointments/1/status \
+curl -X DELETE http://localhost:3000/schemas/schema123 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Schema deleted successfully",
+  "data": null,
+  "statusCode": 200
+}
+```
+
+---
+
+## 👥 User Management Endpoints
+
+These endpoints require authentication and specific roles.
+
+### ➕ Create User (Admin Only)
+```bash
+POST /user
+```
+
+**Request:**
+```bash
+curl -X POST http://localhost:3000/user \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
   -d '{
-    "status": "confirmed"
+    "email": "anotheruser@example.com",
+    "password": "anotherpassword",
+    "name": "Another User",
+    "roleId": 2 // Assuming 2 is the ID for the USER role
   }'
 ```
 
-### ✅ Confirm Appointment
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Usuario creado exitosamente",
+  "data": {
+    "id": 3,
+    "email": "anotheruser@example.com",
+    "name": "Another User",
+    "roleId": 2,
+    "isActive": true,
+    "createdAt": "2024-07-17T10:10:00.000Z",
+    "updatedAt": "2024-07-17T10:10:00.000Z"
+  },
+  "statusCode": 201
+}
+```
+
+### 📋 Get All Users (User or Admin)
 ```bash
-PATCH /appointments/:id/confirm
+GET /user
 ```
 
 **Request:**
 ```bash
-curl -X PATCH http://localhost:3000/appointments/1/confirm
+curl http://localhost:3000/user \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
-### ❌ Cancel Appointment
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Usuarios obtenidos exitosamente",
+  "data": [
+    {
+      "id": 1,
+      "email": "admin@example.com",
+      "name": "Admin User",
+      "role": { "name": "ADMIN" }
+    },
+    {
+      "id": 2,
+      "email": "user@example.com",
+      "name": "Regular User",
+      "role": { "name": "USER" }
+    }
+  ],
+  "statusCode": 200
+}
+```
+
+### 🔍 Get User by ID (User or Admin)
 ```bash
-PATCH /appointments/:id/cancel
+GET /user/:id
 ```
 
 **Request:**
 ```bash
-curl -X PATCH http://localhost:3000/appointments/1/cancel
+# As Admin
+curl http://localhost:3000/user/2 \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN"
+
+# As User (viewing own profile)
+curl http://localhost:3000/user/2 \
+  -H "Authorization: Bearer YOUR_USER_JWT_TOKEN"
 ```
 
-### ✔️ Complete Appointment
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Usuario obtenido exitosamente",
+  "data": {
+    "id": 2,
+    "email": "user@example.com",
+    "name": "Regular User",
+    "role": { "name": "USER" },
+    "isActive": true,
+    "createdAt": "2024-07-17T10:00:00.000Z",
+    "updatedAt": "2024-07-17T10:00:00.000Z"
+  },
+  "statusCode": 200
+}
+```
+
+### ✏️ Update User (User or Admin)
 ```bash
-PATCH /appointments/:id/complete
+PATCH /user/:id
 ```
 
 **Request:**
 ```bash
-curl -X PATCH http://localhost:3000/appointments/1/complete
+# As Admin
+curl -X PATCH http://localhost:3000/user/2 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
+  -d '{
+    "name": "Updated Regular User"
+  }'
+
+# As User (updating own profile)
+curl -X PATCH http://localhost:3000/user/2 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_USER_JWT_TOKEN" \
+  -d '{
+    "name": "My New Name"
+  }'
 ```
 
-### 🗑️ Delete Appointment
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Usuario actualizado exitosamente",
+  "data": {
+    "id": 2,
+    "email": "user@example.com",
+    "name": "Updated Regular User",
+    "role": { "name": "USER" },
+    "isActive": true,
+    "createdAt": "2024-07-17T10:00:00.000Z",
+    "updatedAt": "2024-07-17T10:15:00.000Z"
+  },
+  "statusCode": 200
+}
+```
+
+### 🗑️ Delete User (User or Admin)
 ```bash
-DELETE /appointments/:id
+DELETE /user/:id
 ```
 
 **Request:**
 ```bash
-curl -X DELETE http://localhost:3000/appointments/1
+# As Admin
+curl -X DELETE http://localhost:3000/user/2 \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN"
+
+# As User (deleting own profile - check service logic if this is allowed)
+# Note: The controller allows this based on the @Roles decorator, but the service might prevent it.
+# Assuming service allows user to delete own profile if not ADMIN.
+curl -X DELETE http://localhost:3000/user/2 \
+  -H "Authorization: Bearer YOUR_USER_JWT_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Usuario eliminado exitosamente",
+  "data": null,
+  "statusCode": 200
+}
 ```
 
 ---
@@ -353,90 +509,13 @@ curl -X DELETE http://localhost:3000/appointments/1
 
 ---
 
-## 🏷️ Appointment Status Values
-
-| Status | Description |
-|--------|-------------|
-| `scheduled` | Cita programada |
-| `confirmed` | Cita confirmada |
-| `in_progress` | Cita en progreso |
-| `completed` | Cita completada |
-| `cancelled` | Cita cancelada |
-| `no_show` | No se presentó |
-
----
-
-## ✅ Validation Rules
-
-### 👤 User Creation
-- **name**: required, string, not empty
-- **email**: required, valid email format, unique
-- **password**: required, string, minimum 6 characters
-- **phone**: optional, string
-
-### 📅 Appointment Creation
-- **title**: required, string, not empty
-- **description**: optional, string
-- **appointmentDate**: required, valid ISO date string, cannot be in the past
-- **duration**: optional, number, positive, min: 15, max: 480 (default: 60)
-- **status**: optional, valid enum value (default: scheduled)
-- **location**: optional, string
-- **notes**: optional, string
-- **userId**: required, number, positive, must exist
-
----
-
-## 🧪 Testing Sequence
-
-### 1️⃣ Create a User
-```bash
-curl -X POST http://localhost:3000/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Test User",
-    "email": "test@example.com",
-    "password": "123456"
-  }'
-```
-
-### 2️⃣ Verify User Creation
-```bash
-curl http://localhost:3000/users
-```
-
-### 3️⃣ Create Appointment
-```bash
-curl -X POST http://localhost:3000/appointments \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Test Appointment",
-    "appointmentDate": "2024-12-25T10:00:00.000Z",
-    "userId": 1
-  }'
-```
-
-### 4️⃣ Verify Appointment Creation
-```bash
-curl http://localhost:3000/appointments
-curl http://localhost:3000/appointments/user/1
-```
-
-### 5️⃣ Update Appointment Status
-```bash
-curl -X PATCH http://localhost:3000/appointments/1/confirm
-```
-
----
-
 ## 📝 Notes
 
-- 📅 All dates should be in ISO 8601 format
-- ⚡ Time conflict validation is implemented for appointments
-- 🗑️ Soft delete is used (isActive flag)
-- 📄 Pagination is available for appointments listing
-- 🔗 User-appointment relationship is properly maintained
-- 📊 All responses follow the standardized format
-- 🔒 Password is not returned in responses for security
+- 🔒 Authentication is required for most endpoints using a JWT token in the `Authorization: Bearer YOUR_JWT_TOKEN` header.
+- 🔑 Some endpoints require specific user roles (ADMIN, USER).
+- 📅 Dates are typically in ISO 8601 format.
+- 🗑️ Soft delete is used (isActive flag) for users.
+- 📊 All responses follow the standardized format.
 
 ---
 
@@ -446,72 +525,16 @@ curl -X PATCH http://localhost:3000/appointments/1/confirm
 # Start the server
 npm run start:dev
 
-# Create test user
-curl -X POST http://localhost:3000/users \
+# Register a new user
+curl -X POST http://localhost:3000/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"name": "Test User", "email": "test@example.com", "password": "123456"}'
+  -d '{"email": "testuser@example.com", "password": "password123", "name": "Test User"}'
 
-# Create test appointment
-curl -X POST http://localhost:3000/appointments \
+# Login the user (get JWT token)
+curl -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"title": "Test Appointment", "appointmentDate": "2024-12-25T10:00:00.000Z", "userId": 1}'
+  -d '{"email": "testuser@example.com", "password": "password123"}'
 
-# View all data
-curl http://localhost:3000/users
-curl http://localhost:3000/appointments
-```
-```
-
-También puedes crear un archivo adicional con comandos listos para copiar y pegar:
-
-```bash:test-commands.sh
-#!/bin/bash
-
-# API Testing Commands
-# ===================
-
-echo "🚀 Starting API Tests..."
-
-BASE_URL="http://localhost:3000"
-
-echo "1️⃣ Creating test user..."
-curl -X POST $BASE_URL/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Test User",
-    "email": "test@example.com",
-    "password": "123456",
-    "phone": "+1234567890"
-  }'
-
-echo -e "\n\n2️⃣ Getting all users..."
-curl $BASE_URL/users
-
-echo -e "\n\n3️⃣ Creating test appointment..."
-curl -X POST $BASE_URL/appointments \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Test Appointment",
-    "description": "Test description",
-    "appointmentDate": "2024-12-25T10:00:00.000Z",
-    "duration": 60,
-    "location": "Test Location",
-    "userId": 1
-  }'
-
-echo -e "\n\n4️⃣ Getting all appointments..."
-curl $BASE_URL/appointments
-
-echo -e "\n\n5️⃣ Getting user appointments..."
-curl $BASE_URL/appointments/user/1
-
-echo -e "\n\n6️⃣ Confirming appointment..."
-curl -X PATCH $BASE_URL/appointments/1/confirm
-
-echo -e "\n\n✅ Tests completed!"
-```
-
-Para usar el script:
-```bash
-chmod +x test-commands.sh
-./test-commands.sh
+# Example authenticated request (replace YOUR_JWT_TOKEN)
+curl http://localhost:3000/user \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"

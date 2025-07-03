@@ -37,45 +37,6 @@ async function main() {
 
   console.log('Roles USER y ADMIN creados/actualizados.');
 
-      // Primero limpiamos las tablas en el orden correcto (debido a las relaciones)
-      await prisma.city.deleteMany();
-      await prisma.department.deleteMany();
-      await prisma.country.deleteMany();
-      
-      // Insertamos el país (Colombia)
-      const country = await prisma.country.create({
-        data: {
-          name: 'Colombia',
-          code: '+57'
-        }
-      });
-  
-      // Leemos el archivo JSON con los datos
-      const dataPath = path.join(__dirname, 'data', 'colombia.json');
-      const data: ColombiaData = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
-  
-      // Insertamos los departamentos y sus ciudades
-      for (const deptData of data.departments) {
-        const department = await prisma.department.create({
-          data: {
-            name: deptData.name,
-            countryId: country.id
-          }
-        });
-  
-        // Insertamos las ciudades del departamento
-        await prisma.city.createMany({
-          data: deptData.cities.map(cityName => ({
-            name: cityName,
-            departmentId: department.id
-          }))
-        });
-      }
-
-      
-  console.log('Ubicaciones Actualizadas.');
-         
-  
 }
 
 main()
