@@ -5,7 +5,6 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { SchemaModel, SchemaModelSchema } from './schemas.schema';
 import { DocumentModel, DocumentModelSchema } from './documents.schema';
 import { MongoOrmService } from './mongoose.service';
-
 @Global()
 @Module({
   imports: [
@@ -15,7 +14,10 @@ import { MongoOrmService } from './mongoose.service';
       { name: 'Document', schema: DocumentModelSchema },
     ]),
   ],
-  providers: [MongoOrmService, ConfigService],
-  exports: [MongoOrmService, ConfigService],
+  providers: [ConfigService], // ✅ Solo ConfigService
+  exports: [
+    ConfigService,
+    MongooseModule, // ✅ MUY importante
+  ],
 })
 export class MongooseModelsModule {}
