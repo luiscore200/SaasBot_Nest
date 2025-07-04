@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsArray, ValidateNested, IsBoolean, IsEnum,IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsArray, ValidateNested, IsBoolean, IsEnum,IsOptional, ArrayMinSize } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export enum FieldType {
@@ -9,8 +9,8 @@ export enum FieldType {
   DATE = 'date',
 }
 export enum SchemaCategory {
-  CONSULTANT = 'consultant',
-  SCHEDULER = 'scheduler',
+  INVENTORY = 'inventory',
+  SCHEDULE = 'schedule',
 }
 
 export class CreateSchemaFieldDto {
@@ -49,5 +49,6 @@ export class CreateSchemaDto {
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => CreateSchemaFieldDto)
+  @ArrayMinSize(1)
   fields: CreateSchemaFieldDto[];
 }

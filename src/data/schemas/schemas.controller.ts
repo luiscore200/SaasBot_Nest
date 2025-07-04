@@ -13,22 +13,36 @@ export class SchemasController {
   }
 
   @Get()
-  findAll(@Query('company_id') companyId: string) {
-    return this.schemasService.getSchemasByCompany(companyId);
+  findAll(
+    @Query('company_id') companyId: string,
+    @Query('deleted') deleted?: string,
+  ) {
+    const deletedFilter = deleted !== undefined ? deleted === 'true' : undefined;
+    return this.schemasService.getSchemasByCompany(companyId, deletedFilter);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.schemasService.getSchemaById(id);
+  findOne(
+    @Param('id') id: string,
+    @Query('deleted') deleted?: string,
+  ) {
+    const deletedFilter = deleted !== undefined ? deleted === 'true' : undefined;
+    return this.schemasService.getSchemaById(id, deletedFilter);
   }
 
   @Patch(':id')
   update(@Param('id') id: string, @Body() updateSchemaDto: UpdateSchemaDto) {
+    console.log(updateSchemaDto);
     return this.schemasService.updateSchema(id, updateSchemaDto);
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string) {
-    return this.schemasService.deleteSchema(id);
+  delete(
+    @Param('id') id: string,
+    @Query('hard') hard?: string,
+  ) {
+    console.log(id,hard);
+    const hardDelete = hard !== undefined ? hard === 'true' : false; // Default to soft delete
+    return this.schemasService.deleteSchema(id, hardDelete);
   }
 }

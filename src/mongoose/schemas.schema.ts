@@ -42,6 +42,12 @@ export class SchemaModel {
   }>;
 
   @Prop({ default: false })
+  deleted: boolean;
+
+  @Prop({ default: true })
+  active: boolean;
+
+  @Prop({ default: false })
   generated: boolean;
 }
 
