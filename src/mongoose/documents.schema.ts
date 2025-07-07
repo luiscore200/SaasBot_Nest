@@ -1,4 +1,3 @@
-
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
@@ -13,34 +12,27 @@ export class DocumentModel {
   schema_id: string;
 
   @Prop({ required: true })
-  description: string;
+  category: string; // Ej: "inventory"
 
   @Prop({ type: Object, required: true })
-  data: Record<string, any>;
-
-  @Prop({ required: true })
-  category: string;
+  data: Record<string, any>; // Validado en servicio según schema.fields
 
   @Prop({ type: [String], default: [] })
   tags: string[];
 
   @Prop({ default: false })
-  generated: boolean;
+  generated: boolean; // Por IA o no
 
-
-  @Prop({ enum: ['upload', 'llm', 'form'], default: 'upload' })
-  source: string;
- 
   @Prop({ required: false, index: true })
-  vector_id?: string;
+  vector_id?: string; // Para embeddings
 
+  @Prop({ default: true })
+  active: boolean; // Soft enable/disable
 }
 
-
-
-
-
 export const DocumentModelSchema = SchemaFactory.createForClass(DocumentModel);
+
+// Índices recomendados
 DocumentModelSchema.index({ company_id: 1, category: 1 });
 DocumentModelSchema.index({ tags: 1 });
 DocumentModelSchema.index({ company_id: 1, vector_id: 1 });

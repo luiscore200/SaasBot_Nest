@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
 import { SchemasController } from './schemas/schemas.controller';
-import { DocumentsController } from './documents/documents.controller';
-import { DocumentsService } from './documents/documents.service';
 import { SchemasService } from './schemas/schemas.service';
 import { MongooseModelsModule } from '../mongoose/mongoose.module';
+import { DtoService } from './documents/dto/dto.service';
+import { CommonModule } from 'src/common/common.module';
 
 @Module({
-  imports: [MongooseModelsModule],
+  imports: [MongooseModelsModule,CommonModule],
   controllers: [SchemasController],
-  providers: [ SchemasService],
+  providers: [ SchemasService, DtoService],
 })
 export class DataModule {}

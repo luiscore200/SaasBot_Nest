@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, Param, Query, Patch, Delete, UsePipes, ValidationPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Patch,
+  Delete,
+  Query,
+} from '@nestjs/common';
 import { SchemasService } from './schemas.service';
 import { CreateSchemaDto } from './dto/create-schema.dto';
 import { UpdateSchemaDto } from './dto/update-schema.dto';
@@ -7,42 +16,50 @@ import { UpdateSchemaDto } from './dto/update-schema.dto';
 export class SchemasController {
   constructor(private readonly schemasService: SchemasService) {}
 
-  @Post()
-  create(@Body() createSchemaDto: CreateSchemaDto) {
-    return this.schemasService.createSchema(createSchemaDto);
+  @Post(':company_id')
+  create(
+    @Param('company_id') companyId: string,
+    @Body() createSchemaDto: CreateSchemaDto,
+  ) {
+    
+    return this.schemasService.createSchema(companyId, createSchemaDto);
   }
 
-  @Get()
+  @Get(':company_id')
   findAll(
-    @Query('company_id') companyId: string,
+    @Param('company_id') companyId: string,
     @Query('deleted') deleted?: string,
   ) {
     const deletedFilter = deleted !== undefined ? deleted === 'true' : undefined;
     return this.schemasService.getSchemasByCompany(companyId, deletedFilter);
   }
 
-  @Get(':id')
+  @Get(':company_id/:id')
   findOne(
+    @Param('company_id') companyId: string,
     @Param('id') id: string,
     @Query('deleted') deleted?: string,
   ) {
     const deletedFilter = deleted !== undefined ? deleted === 'true' : undefined;
-    return this.schemasService.getSchemaById(id, deletedFilter);
+    return this.schemasService.getSchemaById(companyId, id, deletedFilter);
   }
 
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateSchemaDto: UpdateSchemaDto) {
-    console.log(updateSchemaDto);
-    return this.schemasService.updateSchema(id, updateSchemaDto);
+  @Patch(':company_id/:id')
+  update(
+    @Param('company_id') companyId: string,
+    @Param('id') id: string,
+    @Body() updateSchemaDto: UpdateSchemaDto,
+  ) {
+    return this.schemasService.updateSchema(companyId, id, updateSchemaDto);
   }
 
-  @Delete(':id')
+  @Delete(':company_id/:id')
   delete(
+    @Param('company_id') companyId: string,
     @Param('id') id: string,
     @Query('hard') hard?: string,
   ) {
-    console.log(id,hard);
-    const hardDelete = hard !== undefined ? hard === 'true' : false; // Default to soft delete
-    return this.schemasService.deleteSchema(id, hardDelete);
+    const hardDelete = hard !== undefined ? hard === 'true' : false;
+    return this.schemasService.deleteSchema(companyId, id, hardDelete);
   }
 }

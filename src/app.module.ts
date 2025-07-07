@@ -43,7 +43,7 @@ import { MongooseModule } from '@nestjs/mongoose';
      MongooseModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        uri: config.get<string>('MONGODB_API') || 'mongodb://localhost:27017/mydb',
+        uri:  `${config.get<string>('MONGODB_API')}${config.get<string>('MONGO_PERMISSIONS') }`|| 'mongodb://localhost:27017/mydb',
       }),
     }),
 

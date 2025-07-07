@@ -12,6 +12,8 @@ export class SchemaModel {
   @Prop({ required: true })
   name: string;
 
+  
+
   @Prop({ required: false })
   description?: string;
 

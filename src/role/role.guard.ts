@@ -2,13 +2,13 @@ import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, Forbi
 import { Reflector } from '@nestjs/core';
 import { RoleName } from '@prisma/client'; // Importar el enum de Prisma
 import { ROLES_KEY } from '../common/decorators/roles.decorator'; // Importar la clave del decorador
-import { PercistenceService } from '../common/services/percistence/percistence.service'; // Importar PercistenceService
+import { PersistenceService } from '../common/services/percistence/persistence.service'; // Importar PercistenceService
 
 @Injectable()
 export class RoleGuard implements CanActivate {
   constructor(
     private reflector: Reflector,
-    private percistenceService: PercistenceService, // Inyectar PercistenceService
+    private percistenceService: PersistenceService, // Inyectar PercistenceService
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> { // Hacer canActivate asíncrono

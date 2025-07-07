@@ -1,0 +1,1 @@
+export type WithExtra<T, E extends object> = T & E;

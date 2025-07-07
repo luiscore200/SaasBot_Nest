@@ -1,108 +1,188 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { MongoOrmService } from 'src/mongoose/mongoose.service';
-import { SchemaModel } from '../../mongoose/schemas.schema';
+import {
+  SchemaDocument,
+  SchemaModel,
+  SchemaModelSchema,
+} from '../../mongoose/schemas.schema';
 import { CreateSchemaDto } from './dto/create-schema.dto';
+import { PersistenceService } from 'src/common/services/percistence/persistence.service';
 
 @Injectable()
 export class SchemasService {
-  private readonly orm: MongoOrmService<SchemaModel>;
 
-  constructor(@InjectModel('Schema') schemaModel: Model<SchemaModel>) {
-    this.orm = new MongoOrmService(schemaModel);
-  }
 
-  async createSchema(data: CreateSchemaDto) {
+  constructor(private readonly persistence: PersistenceService) {}
+
+  /**
+   * Crea un esquema en la DB del cliente correcto.
+   */
+  async createSchema(companyId: string, data: CreateSchemaDto) {
     try {
-      return this.orm.create(data);
-    } catch (error) {
-      // Log or handle the error appropriately
-      console.error('Error creating schema:', error);
-      throw error; // Re-throw the error after handling
+      const model = await this.persistence.getTenantModel<SchemaModel>(
+        companyId,
+        'Schema',
+        SchemaModelSchema,
+      );
+      const orm = new MongoOrmService<SchemaModel>(model);
+
+      const created = await orm.create(data);
+      await this.persistence.refreshSchemas();
+
+      return created;
+    } catch (error: any) {
+      console.error(`[SchemasService][createSchema]`, error);
+      throw new InternalServerErrorException({
+        message: 'No se pudo crear el esquema.',
+        details: error.message,
+      });
     }
   }
 
-  async getSchemasByCompany(company_id: string, deleted?: boolean) {
+  /**
+   * Lista esquemas desde la DB del cliente.
+   */
+  async getSchemasByCompany(companyId: string, deleted?: boolean) {
     try {
-      const query: any = { company_id };
-      if (deleted !== undefined) {
-        query.deleted = deleted;
-      } else {
-        query.deleted = false; // Default to not deleted
-      }
-      return this.orm.findAll(query);
-    } catch (error) {
-      console.error('Error getting schemas by company:', error);
-      throw error;
+      const model = await this.persistence.getTenantModel<SchemaModel>(
+        companyId,
+        'Schema',
+        SchemaModelSchema,
+      );
+      const orm = new MongoOrmService<SchemaModel>(model);
+
+      const query: any = { company_id: companyId };
+      query.deleted = deleted !== undefined ? deleted : false;
+
+      return orm.findAll(query);
+    } catch (error: any) {
+      console.error(`[SchemasService][getSchemasByCompany]`, error);
+      throw new InternalServerErrorException({
+        message: 'No se pudieron obtener los esquemas.',
+        details: error.message,
+      });
     }
   }
 
-  async getSchemaById(id: string, deleted?: boolean) {
+  /**
+   * Obtiene un esquema por ID desde la DB correcta.
+   */
+  async getSchemaById(companyId: string, id: string, deleted?: boolean) {
     try {
+      const model = await this.persistence.getTenantModel<SchemaModel>(
+        companyId,
+        'Schema',
+        SchemaModelSchema,
+      );
+      const orm = new MongoOrmService<SchemaModel>(model);
+
       const query: any = { _id: id };
-      if (deleted !== undefined) {
-        query.deleted = deleted;
-      } else {
-        query.deleted = false; // Default to not deleted
-      }
-      const schema = await this.orm.findOne(query);
+      query.deleted = deleted !== undefined ? deleted : false;
+
+      const schema = await orm.findOne(query);
       if (!schema) {
-        throw new NotFoundException(`Schema with ID "${id}" not found.`);
+        throw new NotFoundException({
+          message: `No se encontró un esquema con ID "${id}".`,
+        });
       }
+
       return schema;
-    } catch (error) {
-      console.error('Error getting schema by ID:', error);
-      throw error;
+    } catch (error: any) {
+      if (error instanceof NotFoundException) throw error;
+      console.error(`[SchemasService][getSchemaById]`, error);
+      throw new InternalServerErrorException({
+        message: 'No se pudo obtener el esquema.',
+        details: error.message,
+      });
     }
   }
 
-  async updateSchema(id: string, data: any) {
-    console.log(data);
+  /**
+   * Actualiza un esquema.
+   */
+  async updateSchema(companyId: string, id: string, data: any) {
     try {
-      const existingSchema = await this.orm.findOne({ _id: id, deleted: false });
-      if (!existingSchema) {
-        throw new NotFoundException(`Schema with ID "${id}" not found or is deleted.`);
+      const model = await this.persistence.getTenantModel<SchemaModel>(
+        companyId,
+        'Schema',
+        SchemaModelSchema,
+      );
+      const orm = new MongoOrmService<SchemaModel>(model);
+
+      const existing = await orm.findOne({ _id: id, deleted: false });
+      if (!existing) {
+        throw new NotFoundException({
+          message: `No se encontró un esquema con ID "${id}" o está eliminado.`,
+        });
       }
 
-      // Basic validation for fields structure (can be expanded)
       if (data.fields) {
-        // Check if the number of fields matches (a simple check)
-        if (data.fields.length !== existingSchema.fields.length) {
-             throw new BadRequestException('Cannot change the number of fields in an existing schema.');
+        if (data.fields.length !== existing.fields.length) {
+          throw new BadRequestException({
+            message: 'No se puede cambiar la cantidad de campos del esquema.',
+          });
         }
-        // More detailed validation could compare field names and types
-        // For simplicity, we'll allow updates to existing fields but not structural changes
       }
 
+      const updated = await orm.updateById(id, data);
+      await this.persistence.refreshSchemas();
+      return updated;
+    } catch (error: any) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      )
+        throw error;
 
-      return this.orm.updateById(id, data);
-    } catch (error) {
-      console.error('Error updating schema:', error);
-      throw error;
+      console.error(`[SchemasService][updateSchema]`, error);
+      throw new InternalServerErrorException({
+        message: 'No se pudo actualizar el esquema.',
+        details: error.message,
+      });
     }
   }
 
-  async deleteSchema(id: string, hard?: boolean) {
+  /**
+   * Elimina un esquema (soft o hard delete).
+   */
+  async deleteSchema(companyId: string, id: string, hard?: boolean) {
     try {
-      const existingSchema = await this.orm.findOne({ _id: id, deleted: hard?true:false });
-      console.log(existingSchema);
-      if (!existingSchema) {
-        throw new NotFoundException(`Schema with ID "${id}" not found or is already deleted.`);
+      const model = await this.persistence.getTenantModel<SchemaModel>(
+        companyId,
+        'Schema',
+        SchemaModelSchema,
+      );
+      const orm = new MongoOrmService<SchemaModel>(model);
+
+      const existing = await orm.findOne({ _id: id });
+      if (!existing) {
+        throw new NotFoundException({
+          message: `No se encontró un esquema con ID "${id}".`,
+        });
       }
 
+      let result;
       if (hard) {
-       const del= this.orm.deleteById(id);
-       console.log(del);
-       return del;
+        result = await orm.deleteById(id);
       } else {
-        const del= this.orm.updateById(id, { deleted: true });
-        console.log(del);
-       return del;
+        result = await orm.updateById(id, { deleted: true });
       }
-    } catch (error) {
-      console.error('Error deleting schema:', error);
-      throw error;
+
+      await this.persistence.refreshSchemas();
+      return result;
+    } catch (error: any) {
+      if (error instanceof NotFoundException) throw error;
+
+      console.error(`[SchemasService][deleteSchema]`, error);
+      throw new InternalServerErrorException({
+        message: 'No se pudo eliminar el esquema.',
+        details: error.message,
+      });
     }
   }
 }
