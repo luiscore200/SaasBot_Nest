@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsString, IsNotEmpty, IsOptional, IsArray, IsBoolean, ValidateNested } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsArray, IsBoolean, ValidateNested, IsObject } from 'class-validator';
 
 export class SingleDocumentDto {
   @IsString()
@@ -11,27 +11,27 @@ export class SingleDocumentDto {
   schema_id: string;
 
   @IsString()
-  @IsOptional()
-  category?: string;  // Opcional si la categoría se resuelve por schema
+  
+  category: string;  // Opcional si la categoría se resuelve por schema
 
-  @IsOptional()
+  @IsObject()
   data: Record<string, any>; // Campos flexibles, validados dinámicamente
 
   @IsArray()
-  @IsOptional()
-  tags?: string[];
+
+  tags: string[];
 
   @IsBoolean()
-  @IsOptional()
+ 
   generated?: boolean;
 
   @IsString()
   @IsOptional()
-  vector_id?: string;
+  vector_i?: string;
 
   @IsBoolean()
-  @IsOptional()
-  active?: boolean;
+ 
+  active: boolean;
 }
 
 

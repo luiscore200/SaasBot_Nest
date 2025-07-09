@@ -13,50 +13,31 @@ export class MongoOrmService<T> {
     protected readonly model: Model<T>,
     protected readonly connection?: Connection,
     protected readonly session?: ClientSession,
-  ) {}
+  ) {
+    this.connection = connection || model.db;
+  }
 
   private normalizeSession(s?: ClientSession): ClientSession | null {
     return s || null;
   }
 
   async create(data: Partial<T>, session?: ClientSession) {
-    try {
+ 
       const s = this.normalizeSession(session || this.session);
       const doc = new this.model(data);
       return s ? await doc.save({ session: s }) : await doc.save();
-    } catch (error: any) {
-      console.error(`[MongoOrmService][create]`, error);
-
-      if (error?.name === 'ValidationError') {
-        throw new BadRequestException({
-          message: 'Datos inválidos. Verifica los campos enviados.',
-          details: error.message,
-        });
-      }
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al crear el recurso.',
-        details: error.message,
-      });
-    }
+   
   }
 
   async findAll(filter: any = {}, session?: ClientSession) {
-    try {
+   
       const s = this.normalizeSession(session || this.session);
       return this.model.find(filter).session(s).exec();
-    } catch (error: any) {
-      console.error(`[MongoOrmService][findAll]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al obtener los recursos.',
-        details: error.message,
-      });
-    }
+   
   }
 
   async findOne(filter: any, session?: ClientSession) {
-    try {
+    
       const s = this.normalizeSession(session || this.session);
       const doc = await this.model.findOne(filter).session(s).exec();
 
@@ -68,20 +49,11 @@ export class MongoOrmService<T> {
       }
 
       return doc;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-
-      console.error(`[MongoOrmService][findOne]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al buscar el recurso.',
-        details: error.message,
-      });
-    }
+   
   }
 
   async findById(id: string, session?: ClientSession) {
-    try {
+   
       const s = this.normalizeSession(session || this.session);
       const doc = await this.model.findById(id).session(s).exec();
 
@@ -93,20 +65,11 @@ export class MongoOrmService<T> {
       }
 
       return doc;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-
-      console.error(`[MongoOrmService][findById]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al buscar por ID.',
-        details: error.message,
-      });
-    }
+    
   }
 
   async updateById(id: string, data: Partial<T>, session?: ClientSession) {
-    try {
+  
       const s = this.normalizeSession(session || this.session);
       const updated = await this.model
         .findByIdAndUpdate(id, data, { new: true, session: s })
@@ -120,20 +83,11 @@ export class MongoOrmService<T> {
       }
 
       return updated;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-
-      console.error(`[MongoOrmService][updateById]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al actualizar el recurso.',
-        details: error.message,
-      });
-    }
+ 
   }
 
   async deleteById(id: string, session?: ClientSession) {
-    try {
+   
       const s = this.normalizeSession(session || this.session);
       const deleted = await this.model.findByIdAndDelete(id, { session: s }).exec();
 
@@ -145,30 +99,14 @@ export class MongoOrmService<T> {
       }
 
       return deleted;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-
-      console.error(`[MongoOrmService][deleteById]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al eliminar el recurso.',
-        details: error.message,
-      });
-    }
+    
   }
 
   async count(filter: any = {}, session?: ClientSession) {
-    try {
+    
       const s = this.normalizeSession(session || this.session);
       return this.model.countDocuments(filter).session(s).exec();
-    } catch (error: any) {
-      console.error(`[MongoOrmService][count]`, error);
-
-      throw new InternalServerErrorException({
-        message: 'Error inesperado al contar los recursos.',
-        details: error.message,
-      });
-    }
+   
   }
 
   async transaction<R>(operations: (orm: MongoOrmService<T>) => Promise<R>): Promise<R> {
