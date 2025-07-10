@@ -43,7 +43,6 @@ export class DocumentsController {
    
    
   ) {
-    console.log(ids);
     const res = await this.documentsService.deleteDocuments(companyId, schemaId, ids);
     return ResponseManager.success(res,"Resource deleted successfully", 200);
   }

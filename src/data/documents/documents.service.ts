@@ -29,7 +29,7 @@ export class DocumentsService {
     schemaId: string,
     createDto: any,
   ) {
-    try {
+
       const documents = createDto;
       if (!documents || documents.length === 0) {
         throw new BadRequestException({
@@ -80,13 +80,7 @@ export class DocumentsService {
         }
         return created;
       });
-    } catch (error: any) {
-      console.error(`[DocumentsService][createDocuments]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudieron crear los documentos.',
-        details: error.message,
-      });
-    }
+    
   }
   
 
@@ -97,6 +91,7 @@ export class DocumentsService {
     dto: any,
   ) {
     
+
       const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -141,7 +136,7 @@ export class DocumentsService {
     id: string,
     dto: UpdateDocumentDto,
   ) {
-    try {
+    
       // --- Paso 1: Obtener el modelo y ORM
       const docModel = await this.persistence.getTenantModel<DocumentModel>(
         companyId,
@@ -206,13 +201,7 @@ export class DocumentsService {
   
       // --- Paso 6: Actualizar
       return await docOrm.updateById(id, toUpdate);
-    } catch (error: any) {
-      console.error(`[DocumentsService][updateDocument]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo actualizar el documento.',
-        details: error.message,
-      });
-    }
+   
   }
   
   // --- Eliminar múltiples documentos ---
@@ -222,7 +211,7 @@ export class DocumentsService {
     ids: string[],
   ) {
    
-      console.log(ids);
+     
       if (!ids || ids.length === 0) {
         throw new BadRequestException({
           message: 'No se enviaron IDs para eliminar.',
@@ -264,7 +253,7 @@ export class DocumentsService {
     schemaId: string,
     id: string,
   ) {
-    try {
+  
       const docModel = await this.persistence.getTenantModel<DocumentModel>(
         companyId,
         'Document',
@@ -274,40 +263,28 @@ export class DocumentsService {
 
       const deleted = await docOrm.deleteById(id);
       return deleted;
-    } catch (error: any) {
-      console.error(`[DocumentsService][deleteDocument]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo eliminar el documento.',
-        details: error.message,
-      });
-    }
+   
   }
 
   // --- Obtener todos ---
   async findAll(companyId: string, schemaId: string, filter: any = {}) {
-    try {
+    
       const docModel = await this.persistence.getTenantModel<DocumentModel>(
         companyId,
         'Document',
         DocumentModelSchema,
       );
       const docOrm = new MongoOrmService<DocumentModel>(docModel);
-      console.log(schemaId);
+     
       const finalFilter = { ...filter, schema_id: schemaId };
-      console.log(finalFilter);
+  
       return await docOrm.findAll(finalFilter);
-    } catch (error: any) {
-      console.error(`[DocumentsService][findAll]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudieron obtener los documentos.',
-        details: error.message,
-      });
-    }
+    
   }
 
   // --- Obtener uno ---
   async findOne(companyId: string, schemaId: string, id: string) {
-    try {
+  
       const docModel = await this.persistence.getTenantModel<DocumentModel>(
         companyId,
         'Document',
@@ -331,12 +308,6 @@ export class DocumentsService {
       }
 
       return doc;
-    } catch (error: any) {
-      console.error(`[DocumentsService][findOne]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo obtener el documento.',
-        details: error.message,
-      });
-    }
+  
   }
 }

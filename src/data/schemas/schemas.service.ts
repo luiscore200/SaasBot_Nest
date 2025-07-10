@@ -23,7 +23,7 @@ export class SchemasService {
    * Crea un esquema en la DB del cliente correcto.
    */
   async createSchema(companyId: string, data: CreateSchemaDto) {
-    try {
+
       const model = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -35,20 +35,14 @@ export class SchemasService {
       await this.persistence.refreshSchemas();
 
       return created;
-    } catch (error: any) {
-      console.error(`[SchemasService][createSchema]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo crear el esquema.',
-        details: error.message,
-      });
-    }
+  
   }
 
   /**
    * Lista esquemas desde la DB del cliente.
    */
   async getSchemasByCompany(companyId: string, deleted?: boolean) {
-    try {
+
       const model = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -60,20 +54,14 @@ export class SchemasService {
       query.deleted = deleted !== undefined ? deleted : false;
 
       return orm.findAll(query);
-    } catch (error: any) {
-      console.error(`[SchemasService][getSchemasByCompany]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudieron obtener los esquemas.',
-        details: error.message,
-      });
-    }
+  
   }
 
   /**
    * Obtiene un esquema por ID desde la DB correcta.
    */
   async getSchemaById(companyId: string, id: string, deleted?: boolean) {
-    try {
+  
       const model = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -92,21 +80,14 @@ export class SchemasService {
       }
 
       return schema;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-      console.error(`[SchemasService][getSchemaById]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo obtener el esquema.',
-        details: error.message,
-      });
-    }
+   
   }
 
   /**
    * Actualiza un esquema.
    */
   async updateSchema(companyId: string, id: string, data: any) {
-    try {
+  
       const model = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -132,26 +113,14 @@ export class SchemasService {
       const updated = await orm.updateById(id, data);
       await this.persistence.refreshSchemas();
       return updated;
-    } catch (error: any) {
-      if (
-        error instanceof NotFoundException ||
-        error instanceof BadRequestException
-      )
-        throw error;
-
-      console.error(`[SchemasService][updateSchema]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo actualizar el esquema.',
-        details: error.message,
-      });
-    }
+ 
   }
 
   /**
    * Elimina un esquema (soft o hard delete).
    */
   async deleteSchema(companyId: string, id: string, hard?: boolean) {
-    try {
+   
       const model = await this.persistence.getTenantModel<SchemaModel>(
         companyId,
         'Schema',
@@ -175,14 +144,5 @@ export class SchemasService {
 
       await this.persistence.refreshSchemas();
       return result;
-    } catch (error: any) {
-      if (error instanceof NotFoundException) throw error;
-
-      console.error(`[SchemasService][deleteSchema]`, error);
-      throw new InternalServerErrorException({
-        message: 'No se pudo eliminar el esquema.',
-        details: error.message,
-      });
     }
-  }
 }
