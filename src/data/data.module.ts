@@ -6,10 +6,12 @@ import { DtoService } from './documents/dto/dto.service';
 import { CommonModule } from 'src/common/common.module';
 import { DocumentsController } from './documents/documents.controller';
 import { DocumentsService } from './documents/documents.service';
+import { MapflowController } from './mapflow/mapflow.controller';
+import { MapflowService } from './mapflow/mapflow.service';
 
 @Module({
   imports: [MongooseModelsModule,CommonModule],
-  controllers: [SchemasController,DocumentsController],
-  providers: [ SchemasService, DtoService,DocumentsService],
+  controllers: [SchemasController,DocumentsController, MapflowController],
+  providers: [ SchemasService, DtoService,DocumentsService, MapflowService],
 })
 export class DataModule {}
