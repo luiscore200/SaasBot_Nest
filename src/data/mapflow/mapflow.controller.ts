@@ -5,14 +5,17 @@ import { MapflowService } from './mapflow.service';
 export class MapflowController {
   constructor(private readonly mapflowService: MapflowService) {}   
 
-@Post(':companyId/:schemaId')
+@Post(':companyId')
   async create(
     @Param('companyId') companyId: string,
-    @Body() dto: any, 
+    @Body() dto:any, 
   ) {
-     console.log(dto);
+     console.log(JSON.stringify(dto));
      return 'ok';   
   }
+
+
+
 
 
 }
