@@ -15,7 +15,8 @@ export  type NodeData =
     | OutputNodeData
     | FallbackNodeData;
 
-export  type MappedNode2 = any & {
+export  type MappedNode2 = {
+        type: NodeType; // Add type property
         data: NodeData;
         next?: MappedNode2[];
       };
@@ -46,8 +47,6 @@ export interface ConversationNodeData {
   type: "start" | "message" | "question" | "condition" | "end";
   mode?: "template" | "ia";
   message: string;
-  onConfigChange?: (config: any) => void;
-  onRemove?: (nodeId: string) => void;
 }
 
 
@@ -59,8 +58,6 @@ export interface InputNodeData {
   fieldType: "text" | "number" | "date" | "select";
   description: string;
   options?: string[];
-  onConfigChange: (config: any) => void;
-  onRemove: (nodeId: string) => void;
 }
 
 
@@ -69,8 +66,6 @@ export interface InputNodeData {
 export interface FallbackNodeData {
   label: string;
   message: string;
-  onConfigChange: (config: any) => void;
-  onRemove: (nodeId: string) => void;
 }
 
 
@@ -99,8 +94,6 @@ export interface OutputNodeData {
   templateMode: 'raw' | 'template';
   availableSchemas: SchemaInfo[];
   availableFormFields: FormField[];
-  onConfigChange: (config: any) => void;
-  onRemove: (nodeId: string) => void;
 }
 
 
@@ -116,22 +109,23 @@ interface Measured {
 }
 
 // Nodo genérico
-interface node {
+export interface node {
   id: string;
   type: NodeType;
   position: Position;
   data: NodeData;
   measured: Measured;
   selected?: boolean;
+  dragging?: boolean;
 }
 
-type NodeType = "conversationNode" | "outputNode"| "inputNode" | "fallbackNode";
+export type NodeType = "conversationNode" | "outputNode"| "inputNode" | "fallbackNode";
 
 // Edge (conexión entre nodos)
 interface Edge {
   id: string;
   source: string; // id del nodo origen
   target: string; // id del nodo destino
-  type: "default" | "custom";
+  type: "default" | "custom" | "fallback";
   style?: Record<string, any>;
 }
