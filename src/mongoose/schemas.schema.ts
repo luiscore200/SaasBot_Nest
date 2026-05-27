@@ -7,10 +7,10 @@ export type SchemaDocument = SchemaModel & Document;
 @Schema({ timestamps: true })
 export class SchemaModel {
   @Prop({ required: true })
-  company_id: string;
+  company_id!: string;
 
   @Prop({ required: true })
-  name: string;
+  name!: string;
 
   
 
@@ -18,7 +18,7 @@ export class SchemaModel {
   description?: string;
 
   @Prop({ required: true })
-  category: string; // inventory | agenda | article
+  category!: string; // inventory | agenda | article
 
   @Prop({
     required: true,
@@ -33,24 +33,28 @@ export class SchemaModel {
         },
         required: { type: Boolean, default: false },
         unique: { type: Boolean, default: false },
+        description: { type: String, required: false },  // ← agregar esto
       },
     ],
   })
-  fields: Array<{
+  fields!: Array<{
     name: string;
     type: 'string' | 'number' | 'boolean' | 'json' | 'date';
     required: boolean;
     unique?: boolean;
+     description?: string;  // ← y aquí
   }>;
 
   @Prop({ default: false })
-  deleted: boolean;
+  deleted!: boolean;
 
   @Prop({ default: true })
-  active: boolean;
+  active!: boolean;
 
   @Prop({ default: false })
-  generated: boolean;
+  generated!: boolean;
+
+
 }
 
 

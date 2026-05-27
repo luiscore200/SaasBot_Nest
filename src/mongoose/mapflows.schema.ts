@@ -1,109 +1,108 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
-// ================== COMMON ==================
-class FormField {
-  @Prop({ required: true })
-  name: string;
+export type MapflowDocument = MapflowModel & Document;
 
-  @Prop({ required: true })
-  type: string;
+const NODE_TYPES = [
+  'conversationNode',
+  'intentNode',
+  'inputNode',
+  'outputNode',
+  'fallbackNode',
+  'routerNode',
+  'confirmationNode',
+  'goToNode',
+] as const;
+
+const EDGE_TYPES = ['default', 'fallback', 'jump'] as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class Position {
+  @Prop({ required: true }) x!: number;
+  @Prop({ required: true }) y!: number;
 }
 
-class NodePosition {
-  @Prop({ required: true })
-  x: number;
-
-  @Prop({ required: true })
-  y: number;
+class Measured {
+  @Prop({ required: true }) width!: number;
+  @Prop({ required: true }) height!: number;
 }
 
-class NodeMeasured {
+class FlowNode {
   @Prop({ required: true })
-  width: number;
+  id!: string;
 
-  @Prop({ required: true })
-  height: number;
-}
+  @Prop({ required: true, enum: NODE_TYPES })
+  type!: string;
 
-class Node {
-  @Prop({ required: true })
-  id: string;
-
-  @Prop({
-    required: true,
-    enum: ['conversationNode', 'outputNode', 'inputNode', 'fallbackNode'],
-  })
-  type: 'conversationNode' | 'outputNode' | 'inputNode' | 'fallbackNode';
-
-  @Prop({ type: NodePosition, required: true })
-  position: NodePosition;
-
-  @Prop({ type: NodeMeasured, required: true })
-  measured: NodeMeasured;
+  @Prop({ type: Position, required: true })
+  position!: Position;
 
   @Prop({ type: Object, required: true })
-  data: Record<string, any>;
+  data!: Record<string, any>;
 
-  // ⚡️ Cambiamos: no required, pero default false
-  @Prop({ default: false })
-  selected?: boolean;
+  @Prop({ type: Measured })
+  measured?: Measured;
 
-  @Prop({ default: false })
-  dragging?: boolean;
+  @Prop({ default: false }) selected?: boolean;
+  @Prop({ default: false }) dragging?: boolean;
 }
 
-class Edge {
+class FlowEdge {
   @Prop({ required: true })
-  id: string;
+  id!: string;
 
   @Prop({ required: true })
-  source: string;
+  source!: string;
 
   @Prop({ required: true })
-  target: string;
+  target!: string;
 
-  @Prop({
-    required: true,
-    enum: ['default', 'custom', 'fallback'],
-  })
-  type: 'default' | 'custom' | 'fallback';
+  @Prop()
+  sourceHandle?: string;
+
+  @Prop({ required: true, enum: EDGE_TYPES })
+  type!: string;
+
+  @Prop({ type: Object })
+  data?: Record<string, any>;
 
   @Prop({ type: Object })
   style?: Record<string, any>;
 }
 
-export type MapflowDocument = MapflowModel & Document;
+class FormField {
+  @Prop({ required: true }) name!: string;
+  @Prop({ required: true }) type!: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Schema({ timestamps: true })
 export class MapflowModel {
   @Prop({ required: true })
-  company_id: string;
+  company_id!: string;
 
   @Prop({ required: true })
-  name: string;
+  name!: string;
+
+  @Prop({ type: [Object], default: [] })
+  nodes!: FlowNode[];
+
+  @Prop({ type: [Object], default: [] })
+  edges!: FlowEdge[];
+
+  @Prop({ type: [Object], default: [] })
+  formFields!: FormField[];
 
   @Prop({ type: [String], default: [] })
-  selectedSchemas: string[];
+  selectedSchemas!: string[];
 
-  @Prop({ type: [FormField], default: [] })
-  formFields: FormField[];
-
-  @Prop({ type: [Node], default: [] })
-  nodes: Node[];
-
-  @Prop({ type: [Edge], default: [] })
-  edges: Edge[];
-
-  // flags de control (igual que SchemaModel)
   @Prop({ default: false })
-  deleted: boolean;
+  deleted!: boolean;
 
   @Prop({ default: true })
-  active: boolean;
-
-  @Prop({ default: false })
-  generated: boolean;
+  active!: boolean;
 }
 
 export const MapflowModelSchema = SchemaFactory.createForClass(MapflowModel);

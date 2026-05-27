@@ -7,18 +7,21 @@ import {
   Delete,
   Query,
   Put,
+  Patch,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { MapflowService } from './mapflow.service';
 import { CreateMapflowDto } from './dto/create-mapflow.dto';
 import { UpdateMapflowDto } from './dto/update-mapflow.dto';
-
 
 @Controller('mapflows')
 export class MapflowController {
   constructor(private readonly mapflowService: MapflowService) {}
 
   @Post(':companyId')
-  async create(
+  @HttpCode(HttpStatus.CREATED)
+  create(
     @Param('companyId') companyId: string,
     @Body() dto: CreateMapflowDto,
   ) {
@@ -26,28 +29,26 @@ export class MapflowController {
   }
 
   @Get(':companyId')
-  async findAll(
+  findAll(
     @Param('companyId') companyId: string,
     @Query('deleted') deleted?: string,
   ) {
-    const deletedFilter =
-      deleted !== undefined ? deleted === 'true' : undefined;
-    return this.mapflowService.getMapflowsByCompany(companyId, deletedFilter);
+    const includeDeleted = deleted === 'true';
+    return this.mapflowService.getMapflowsByCompany(companyId, includeDeleted);
   }
 
   @Get(':companyId/:id')
-  async findOne(
+  findOne(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
     @Query('deleted') deleted?: string,
   ) {
-    const deletedFilter =
-      deleted !== undefined ? deleted === 'true' : undefined;
-    return this.mapflowService.getMapflowById(companyId, id, deletedFilter);
+    const includeDeleted = deleted === 'true';
+    return this.mapflowService.getMapflowById(companyId, id, includeDeleted);
   }
 
   @Put(':companyId/:id')
-  async update(
+  update(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
     @Body() dto: UpdateMapflowDto,
@@ -55,13 +56,40 @@ export class MapflowController {
     return this.mapflowService.updateMapflow(companyId, id, dto);
   }
 
+  // PATCH separado para toggle active — semánticamente distinto a un update completo
+  @Patch(':companyId/:id/active')
+  toggleActive(
+    @Param('companyId') companyId: string,
+    @Param('id') id: string,
+    @Query('value') value: string,
+  ) {
+    return this.mapflowService.toggleActive(companyId, id, value === 'true');
+  }
+
   @Delete(':companyId/:id')
-  async delete(
+  @HttpCode(HttpStatus.NO_CONTENT)
+  delete(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
     @Query('hard') hard?: string,
   ) {
-    const hardDelete = hard !== undefined ? hard === 'true' : false;
-    return this.mapflowService.deleteMapflow(companyId, id, hardDelete);
+    return this.mapflowService.deleteMapflow(companyId, id, hard === 'true');
+  }
+
+  // Endpoint exclusivo para el engine — separado del CRUD de UI
+  @Get(':companyId/:id/runtime')
+  getActiveRuntime(
+    @Param('companyId') companyId: string,
+    @Param('id') id: string,
+  ) {
+    return this.mapflowService.getActiveRuntime(companyId, id);
+  }
+
+  @Get(':companyId/:id/runtime/history')
+  getRuntimeHistory(
+    @Param('companyId') companyId: string,
+    @Param('id') id: string,
+  ) {
+    return this.mapflowService.getRuntimesByFlow(companyId, id);
   }
 }

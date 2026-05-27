@@ -20,6 +20,13 @@ import { CommonModule } from './common/common.module';
 import { DataModule } from './data/data.module';
 import { MongooseModule } from '@nestjs/mongoose';
 
+import { GroqModule } from './groq/groq.module';
+import { EmbeddingModule } from './embedding/embedding.module';
+import { IndexingModule } from './indexing/indexing.module';
+import { QdrantModule } from './qdrant/qdrant.module';
+import { EngineModule } from './engine/engine.module';
+import { OllamaModule } from './ollama/ollama.module';
+
 
 
 @Module({
@@ -47,6 +54,34 @@ import { MongooseModule } from '@nestjs/mongoose';
         uri:  `${config.get<string>('MONGODB_API')}${config.get<string>('MONGO_PERMISSIONS') }`|| 'mongodb://localhost:27017/mydb',
       }),
     }),
+
+    
+
+     GroqModule,
+
+    
+
+     EmbeddingModule,
+
+    
+
+     IndexingModule,
+
+    
+
+     QdrantModule,
+
+    
+
+     EngineModule,
+
+    
+
+     OllamaModule,
+
+    
+
+     
 
   ],
   controllers: [AppController],

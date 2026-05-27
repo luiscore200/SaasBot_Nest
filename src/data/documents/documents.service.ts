@@ -1,26 +1,30 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
-  InternalServerErrorException,
 } from '@nestjs/common';
 import { PersistenceService } from 'src/common/services/percistence/persistence.service';
 import { MongoOrmService } from 'src/mongoose/mongoose.service';
 import { SchemaModel, SchemaModelSchema } from 'src/mongoose/schemas.schema';
 import {
-  DocumentItem,
   DocumentModel,
   DocumentModelSchema,
 } from 'src/mongoose/documents.schema';
 import { DtoService } from './dto/dto.service';
 import { UpdateDocumentDto } from './dto/update-document.dto';
-
+import { IndexingService } from '../../indexing/indexing/indexing.service'
+import { QdrantService } from '../../qdrant/qdrant.service';
 
 @Injectable()
 export class DocumentsService {
+  private readonly logger = new Logger(DocumentsService.name);
+
   constructor(
     private readonly persistence: PersistenceService,
     private readonly dtoService: DtoService,
+    private readonly indexing: IndexingService,
+    private readonly qdrant: QdrantService,
   ) {}
 
   // --- Crear múltiples documentos ---
@@ -29,60 +33,72 @@ export class DocumentsService {
     schemaId: string,
     createDto: any,
   ) {
-
-      const documents = createDto;
-      if (!documents || documents.length === 0) {
-        throw new BadRequestException({
-          message: 'No se enviaron documentos para crear.',
-          details: 'Array `documents` vacío o indefinido.',
-        });
-      }
-  
-      const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
-        companyId,
-        'Schema',
-        SchemaModelSchema,
-      );
-      const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
-      const schema = await schemaOrm.findById(schemaId);
-      if (!schema) {
-        throw new NotFoundException({
-          message: `El esquema "${schemaId}" no existe.`,
-          details: `Schema con id ${schemaId} no encontrado.`,
-        });
-      }
-  
-      // ✅ Valida cada `doc` como un objeto `data`
-      this.dtoService.validateDataAgainstSchema(
-        documents,
-        schema,
-        { isArray: true, strict: true },
-      );
-  
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
-  
-      return docOrm.transaction(async (ormScoped) => {
-        const created: any[] = [];
-        for (const data of documents) {
-          const toCreate = {
-            data, // 👈 cada item es la `data` pura
-            company_id: companyId,
-            schema_id: schemaId,
-            category: schema.category,
-          };
-          const newDoc = await ormScoped.create(toCreate);
-          created.push(newDoc);
-        }
-        return created;
+    const documents = createDto;
+    if (!documents || documents.length === 0) {
+      throw new BadRequestException({
+        message: 'No se enviaron documentos para crear.',
+        details: 'Array `documents` vacío o indefinido.',
       });
-    
+    }
+
+    const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
+      companyId,
+      'Schema',
+      SchemaModelSchema,
+    );
+    const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
+    const schema = await schemaOrm.findById(schemaId);
+    if (!schema) {
+      throw new NotFoundException({
+        message: `El esquema "${schemaId}" no existe.`,
+        details: `Schema con id ${schemaId} no encontrado.`,
+      });
+    }
+
+    this.dtoService.validateDataAgainstSchema(
+      documents,
+      schema,
+      { isArray: true, strict: true },
+    );
+
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
+
+    const created = await docOrm.transaction(async (ormScoped) => {
+      const results: any[] = [];
+      for (const data of documents) {
+        const toCreate = {
+          data,
+          company_id: companyId,
+          schema_id: schemaId,
+          category: schema.category,
+        };
+        const newDoc = await ormScoped.create(toCreate);
+        results.push(newDoc);
+      }
+      return results;
+    });
+
+    // ── Indexado en background — fuera de la transacción ─────────────────
+    // Si falla Qdrant no hace rollback de los documentos ya creados.
+    // La cola reintentará automáticamente.
+    this.indexing.indexDocuments(
+      created.map((doc) => ({
+        documentId:   doc._id.toString(),
+        schemaId,
+        companyId,
+        category:     schema.category,
+        documentData: doc.data,
+        schemaFields: schema.fields,
+      })),
+    );
+
+    return created;
   }
-  
 
   // --- Crear un documento ---
   async createDocument(
@@ -90,43 +106,47 @@ export class DocumentsService {
     schemaId: string,
     dto: any,
   ) {
-    
-
-      const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
-        companyId,
-        'Schema',
-        SchemaModelSchema,
-      );
-      const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
-      const schema = await schemaOrm.findById(schemaId);
-      if (!schema) {
-        throw new NotFoundException({
-          message: `El esquema "${schemaId}" no existe.`,
-          details: `Schema con id ${schemaId} no encontrado.`,
-        });
-      }
-
-      this.dtoService.validateDataAgainstSchema(dto, schema, {
-        strict: true,
+    const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
+      companyId,
+      'Schema',
+      SchemaModelSchema,
+    );
+    const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
+    const schema = await schemaOrm.findById(schemaId);
+    if (!schema) {
+      throw new NotFoundException({
+        message: `El esquema "${schemaId}" no existe.`,
+        details: `Schema con id ${schemaId} no encontrado.`,
       });
+    }
 
-  
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
+    this.dtoService.validateDataAgainstSchema(dto, schema, { strict: true });
 
-      const toCreate = {
-        data:dto,
-        company_id: companyId,
-        schema_id: schemaId,
-        category:  schema.category,
-      };
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
 
-      return await docOrm.create(toCreate);
-   
+    const created = await docOrm.create({
+      data: dto,
+      company_id: companyId,
+      schema_id: schemaId,
+      category: schema.category,
+    });
+
+    // ── Indexado en background ────────────────────────────────────────────
+    this.indexing.indexDocument({
+      documentId:   (created as any)._id.toString(),
+      schemaId,
+      companyId,
+      category:     schema.category,
+      documentData: dto,
+      schemaFields: schema.fields,
+    });
+
+    return created;
   }
 
   // --- Actualizar un documento ---
@@ -136,116 +156,120 @@ export class DocumentsService {
     id: string,
     dto: UpdateDocumentDto,
   ) {
-    
-      // --- Paso 1: Obtener el modelo y ORM
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
+
+    const existing = await docOrm.findById(id);
+    if (!existing) {
+      throw new NotFoundException({
+        message: `El documento "${id}" no existe.`,
+        details: `Document con id ${id} no encontrado.`,
+      });
+    }
+
+    const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
+      companyId,
+      'Schema',
+      SchemaModelSchema,
+    );
+    const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
+    const schema = await schemaOrm.findById(schemaId);
+    if (!schema) {
+      throw new NotFoundException({
+        message: `El esquema "${schemaId}" no existe.`,
+        details: `Schema con id ${schemaId} no encontrado.`,
+      });
+    }
+
+    let cleanData: Record<string, any> | undefined = undefined;
+
+    if (dto.data !== undefined) {
+      this.dtoService.validateDataAgainstSchema(dto.data, schema, {
+        strict: false,
+        partial: false,
+      });
+
+      const allowed = schema.fields.map((f) => f.name);
+      cleanData = Object.keys(dto.data || {}).reduce((acc, key) => {
+        if (allowed.includes(key)) acc[key] = dto.data![key];
+        return acc;
+      }, {} as Record<string, any>);
+    }
+
+    const toUpdate: any = { ...dto };
+    if (cleanData !== undefined) toUpdate.data = cleanData;
+
+    const updated = await docOrm.updateById(id, toUpdate);
+
+    // ── Re-indexar en background si cambió el data ────────────────────────
+    if (cleanData !== undefined) {
+      this.indexing.indexDocument({
+        documentId:   id,
+        schemaId,
         companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
-  
-      // --- Paso 2: Verificar existencia del documento
-      const existing = await docOrm.findById(id);
-      if (!existing) {
-        throw new NotFoundException({
-          message: `El documento "${id}" no existe.`,
-          details: `Document con id ${id} no encontrado.`,
-        });
-      }
-  
-      // --- Paso 3: Obtener el esquema
-      const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
-        companyId,
-        'Schema',
-        SchemaModelSchema,
-      );
-      const schemaOrm = new MongoOrmService<SchemaModel>(schemaModel);
-      const schema = await schemaOrm.findById(schemaId);
-      if (!schema) {
-        throw new NotFoundException({
-          message: `El esquema "${schemaId}" no existe.`,
-          details: `Schema con id ${schemaId} no encontrado.`,
-        });
-      }
-  
-      // --- Paso 4: Si hay `data`, validarla como partial y limpiar
-      let cleanData: Record<string, any> | undefined = undefined;
-  
-      if (dto.data !== undefined) {
-        // Validar
-        this.dtoService.validateDataAgainstSchema(dto.data, schema, {
-          strict: false,
-          partial: false,
-        });
-      
-        // Filtrar solo campos permitidos del schema
-        const allowed = schema.fields.map(f => f.name);
-      
-        cleanData = Object.keys(dto.data || {}).reduce((acc, key) => {
-          if (allowed.includes(key)) {
-            acc[key] = dto.data![key]; // <-- usa el `!` porque ya verificaste que no es undefined
-          }
-          return acc;
-        }, {} as Record<string, any>);
-      }
-  
-      // --- Paso 5: Construir el objeto final a actualizar
-      const toUpdate: any = {
-        ...dto,
-      };
-  
-      if (cleanData !== undefined) {
-        toUpdate.data = cleanData;
-      }
-  
-      // --- Paso 6: Actualizar
-      return await docOrm.updateById(id, toUpdate);
-   
+        category:     schema.category,
+        documentData: cleanData,
+        schemaFields: schema.fields,
+      });
+    }
+
+    return updated;
   }
-  
+
   // --- Eliminar múltiples documentos ---
   async deleteDocuments(
     companyId: string,
     schemaId: string,
     ids: string[],
   ) {
-   
-     
-      if (!ids || ids.length === 0) {
-        throw new BadRequestException({
-          message: 'No se enviaron IDs para eliminar.',
-          details: 'Array `ids` vacío o indefinido.',
-        });
-      }
-  
-      // 🧹 Normaliza y limpia cada ID
-      const cleanedIds = ids.map(id => id.trim()).filter(id => id.length > 0);
-  
-      if (cleanedIds.length === 0) {
-        throw new BadRequestException({
-          message: 'Todos los IDs están vacíos después de limpiar espacios.',
-        });
-      }
-  
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
-  
-      return docOrm.transaction(async (ormScoped) => {
-        const results: any[] = [];
-        for (const id of cleanedIds) {
-          const deleted = await ormScoped.deleteById(id);
-          results.push(deleted);
-        }
-        return results;
+    if (!ids || ids.length === 0) {
+      throw new BadRequestException({
+        message: 'No se enviaron IDs para eliminar.',
+        details: 'Array `ids` vacío o indefinido.',
       });
+    }
 
+    const cleanedIds = ids.map((id) => id.trim()).filter((id) => id.length > 0);
+
+    if (cleanedIds.length === 0) {
+      throw new BadRequestException({
+        message: 'Todos los IDs están vacíos después de limpiar espacios.',
+      });
+    }
+
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
+
+    // ── Eliminar de Qdrant en background antes de borrar en Mongo ─────────
+    for (const id of cleanedIds) {
+      this.qdrant
+        .delete('documents', {
+          must: [{ key: 'document_id', match: { value: id } }],
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `No se pudo eliminar vector de Qdrant para doc="${id}": ${err.message}`,
+          ),
+        );
+    }
+
+    return docOrm.transaction(async (ormScoped) => {
+      const results: any[] = [];
+      for (const id of cleanedIds) {
+        const deleted = await ormScoped.deleteById(id);
+        results.push(deleted);
+      }
+      return results;
+    });
   }
-  
 
   // --- Eliminar uno ---
   async deleteDocument(
@@ -253,61 +277,64 @@ export class DocumentsService {
     schemaId: string,
     id: string,
   ) {
-  
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
 
-      const deleted = await docOrm.deleteById(id);
-      return deleted;
-   
+    // ── Eliminar de Qdrant en background ─────────────────────────────────
+    this.qdrant
+      .delete('documents', {
+        must: [{ key: 'document_id', match: { value: id } }],
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `No se pudo eliminar vector de Qdrant para doc="${id}": ${err.message}`,
+        ),
+      );
+
+    return docOrm.deleteById(id);
   }
 
   // --- Obtener todos ---
   async findAll(companyId: string, schemaId: string, filter: any = {}) {
-    
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
-     
-      const finalFilter = { ...filter, schema_id: schemaId };
-  
-      return await docOrm.findAll(finalFilter);
-    
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
+
+    const finalFilter = { ...filter, schema_id: schemaId };
+    return docOrm.findAll(finalFilter);
   }
 
   // --- Obtener uno ---
   async findOne(companyId: string, schemaId: string, id: string) {
-  
-      const docModel = await this.persistence.getTenantModel<DocumentModel>(
-        companyId,
-        'Document',
-        DocumentModelSchema,
-      );
-      const docOrm = new MongoOrmService<DocumentModel>(docModel);
+    const docModel = await this.persistence.getTenantModel<DocumentModel>(
+      companyId,
+      'Document',
+      DocumentModelSchema,
+    );
+    const docOrm = new MongoOrmService<DocumentModel>(docModel);
 
-      const doc = await docOrm.findById(id);
-      if (!doc) {
-        throw new NotFoundException({
-          message: `El documento "${id}" no existe.`,
-          details: `Document con id ${id} no encontrado.`,
-        });
-      }
+    const doc = await docOrm.findById(id);
+    if (!doc) {
+      throw new NotFoundException({
+        message: `El documento "${id}" no existe.`,
+        details: `Document con id ${id} no encontrado.`,
+      });
+    }
 
-      if (doc.schema_id !== schemaId) {
-        throw new BadRequestException({
-          message: `El documento "${id}" no pertenece al esquema "${schemaId}".`,
-          details: `schema_id real: ${doc.schema_id}`,
-        });
-      }
+    if (doc.schema_id !== schemaId) {
+      throw new BadRequestException({
+        message: `El documento "${id}" no pertenece al esquema "${schemaId}".`,
+        details: `schema_id real: ${doc.schema_id}`,
+      });
+    }
 
-      return doc;
-  
+    return doc;
   }
 }

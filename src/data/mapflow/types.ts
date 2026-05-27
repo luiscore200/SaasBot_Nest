@@ -1,29 +1,22 @@
-export interface CreateMapflowPayload {
-  name: string;
-  selectedSchemas: string[];
-  formFields: Array<{ name: string; type: string }>;
-  nodes:node[];
-  edges:Edge[];
-  map:MappedNode2[];
-}
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NodeType
+// ─────────────────────────────────────────────────────────────────────────────
 
-export  type NodeData =
-    | InputNodeData
-    | ConversationNodeData
-    | OutputNodeData
-    | FallbackNodeData;
+export type NodeType =
+  | "conversationNode"
+  | "intentNode"
+  | "inputNode"
+  | "outputNode"
+  | "fallbackNode"
+  | "routerNode"
+  | "confirmationNode"
+  | "goToNode";
 
-export  type MappedNode2 = {
-        type: NodeType; // Add type property
-        data: NodeData;
-        next?: MappedNode2[];
-      };
-
-
-
-// ===== COMMON INTERFACES =====
+// ─────────────────────────────────────────────────────────────────────────────
+// Primitivos compartidos
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface FormField {
   name: string;
@@ -33,24 +26,24 @@ export interface FormField {
 export interface SchemaInfo {
   id: string;
   name: string;
-  attributes: Array<{ 
-    id: string; 
-    name: string; 
-    type: string 
-  }>;
+  attributes: Array<{ id: string; name: string; type: string }>;
 }
 
-// ===== CONVERSATION NODE =====
+// ─────────────────────────────────────────────────────────────────────────────
+// ConversationNodeData
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface ConversationNodeData {
   label: string;
   type: "start" | "message" | "question" | "condition" | "end";
   mode?: "template" | "ia";
   message: string;
+  availableFormFields?: FormField[];
 }
 
-
-// ===== INPUT NODE =====
+// ─────────────────────────────────────────────────────────────────────────────
+// InputNodeData
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface InputNodeData {
   label: string;
@@ -58,19 +51,22 @@ export interface InputNodeData {
   fieldType: "text" | "number" | "date" | "select";
   description: string;
   options?: string[];
+  implicit?: boolean;
+  
 }
 
-
-// ===== FALLBACK NODE =====
+// ─────────────────────────────────────────────────────────────────────────────
+// FallbackNodeData
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface FallbackNodeData {
   label: string;
   message: string;
 }
 
-
-
-// ===== OUTPUT NODE =====
+// ─────────────────────────────────────────────────────────────────────────────
+// OutputNodeData
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface SchemeObject {
   id: string;
@@ -83,49 +79,155 @@ export interface GlobalCriteria {
   column: string;
   condition: string;
   value: string;
-  valueSource: 'form' | 'static';
+  valueSource: "form" | "static";
 }
+
+export type TemplateMode = "message" | "list" | "raw";
 
 export interface OutputNodeData {
   label: string;
   schemes: SchemeObject[];
   globalCriteria: GlobalCriteria[];
   outputTemplate?: string;
-  templateMode: 'raw' | 'template';
-  availableSchemas: SchemaInfo[];
+  templateMode: TemplateMode;
+  emptyFallbackEnabled?: boolean;
+  emptyFallbackMessage?: string;
+  availableSchemas?: SchemaInfo[];
+  availableFormFields?: FormField[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IntentNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Intent {
+  id: string;
+  label: string;
+  description: string;
+  examples?: string;
+}
+
+export interface IntentNodeData {
+  label: string;
+  contextPrompt: string;
+  intents: Intent[];
+  fallbackBehavior: "fallback_node" | "retry" | "goto_start";
+  maxRetries: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RouterNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RouterCondition {
+  field: string;
+  operator: string;
+  value: string;
+}
+
+export interface RouterNodeData {
+  label: string;
+  conditions: RouterCondition[];
   availableFormFields: FormField[];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ConfirmationNodeData
+// ─────────────────────────────────────────────────────────────────────────────
 
-interface Position {
-  x: number;
-  y: number;
+export interface ConfirmationNodeData {
+  label: string;
+  confirmationMessage: string;
+  positiveLabel: string;
+  negativeLabel: string;
+  summaryFields: Array<{ fieldName: string; displayLabel: string }>;
+  availableFormFields: FormField[];
 }
 
-// Medidas de un nodo
-interface Measured {
-  width: number;
-  height: number;
+// ─────────────────────────────────────────────────────────────────────────────
+// GoToNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GoToNodeData {
+  label: string;
+  /** ID del nodo destino. El engine lo resuelve en runtime — no se expande en el árbol. */
+  targetNodeId: string;
+  targetNodeLabel: string;
+  reason: string;
 }
 
-// Nodo genérico
-export interface node {
+// ─────────────────────────────────────────────────────────────────────────────
+// NodeData — union discriminada de todos los tipos
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type NodeData =
+  | ConversationNodeData
+  | InputNodeData
+  | OutputNodeData
+  | FallbackNodeData
+  | IntentNodeData
+  | RouterNodeData
+  | ConfirmationNodeData
+  | GoToNodeData;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MappedNode2 — árbol serializado que va al backend / LLM
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MappedNode2 {
   id: string;
   type: NodeType;
-  position: Position;
   data: NodeData;
-  measured: Measured;
+
+  /** Nodos lineales: conversationNode, inputNode, fallbackNode, goToNode */
+  next?: MappedNode2[];
+
+  /**
+   * Nodos de decisión:
+   *   intentNode       → { [intentId]: MappedNode2 }
+   *   routerNode       → { true: MappedNode2, false: MappedNode2 }
+   *   confirmationNode → { yes: MappedNode2, no: MappedNode2 }
+   *   outputNode       → { success: MappedNode2, empty: MappedNode2 }
+   */
+  branches?: Record<string, MappedNode2>;
+
+  /** Exclusivo de intentNode — rama cuando se agotan los maxRetries */
+  fallback?: MappedNode2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI persistence (nodos y edges de ReactFlow)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FlowNode {
+  id: string;
+  type: NodeType;
+  position: { x: number; y: number };
+  data: NodeData;
+  measured?: { width: number; height: number };
   selected?: boolean;
   dragging?: boolean;
 }
 
-export type NodeType = "conversationNode" | "outputNode"| "inputNode" | "fallbackNode";
-
-// Edge (conexión entre nodos)
-interface Edge {
+export interface FlowEdge {
   id: string;
-  source: string; // id del nodo origen
-  target: string; // id del nodo destino
-  type: "default" | "custom" | "fallback";
+  source: string;
+  target: string;
+  sourceHandle?: string;
+  type: "default" | "fallback" | "jump";
+  data?: { visualOnly?: boolean };
   style?: Record<string, any>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateMapflowPayload
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CreateMapflowPayload {
+  name: string;
+  selectedSchemas: string[];
+  formFields: FormField[];
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  map: MappedNode2[];
 }

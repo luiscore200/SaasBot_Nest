@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsNumber,
   IsBoolean,
+  IsObject,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import {
@@ -14,38 +15,36 @@ import {
   InputNodeData,
   FallbackNodeData,
   OutputNodeData,
+  IntentNodeData,
+  RouterNodeData,
+  ConfirmationNodeData,
+  GoToNodeData,
   FormField,
   SchemaInfo,
   SchemeObject,
   GlobalCriteria,
+  RouterCondition,
+  Intent,
 } from '../types';
 
-// === COMMON DTOs ===
-class FormFieldDto implements FormField {
-  @IsString()
-  name: string;
+// ─────────────────────────────────────────────────────────────────────────────
+// Primitivos compartidos
+// ─────────────────────────────────────────────────────────────────────────────
 
-  @IsString()
-  type: string;
+class FormFieldDto implements FormField {
+  @IsString() name: string;
+  @IsString() type: string;
 }
 
 class SchemaAttributeDto {
-  @IsString()
-  id: string;
-
-  @IsString()
-  name: string;
-
-  @IsString()
-  type: string;
+  @IsString() id: string;
+  @IsString() name: string;
+  @IsString() type: string;
 }
 
-class SchemaInfoDTO implements SchemaInfo {
-  @IsString()
-  id: string;
-
-  @IsString()
-  name: string;
+class SchemaInfoDto implements SchemaInfo {
+  @IsString() id: string;
+  @IsString() name: string;
 
   @IsArray()
   @ValidateNested({ each: true })
@@ -54,11 +53,8 @@ class SchemaInfoDTO implements SchemaInfo {
 }
 
 class SchemeObjectDto implements SchemeObject {
-  @IsString()
-  id: string;
-
-  @IsString()
-  selectedSchema: string;
+  @IsString() id: string;
+  @IsString() selectedSchema: string;
 
   @IsArray()
   @IsString({ each: true })
@@ -66,42 +62,31 @@ class SchemeObjectDto implements SchemeObject {
 }
 
 class GlobalCriteriaDto implements GlobalCriteria {
-  @IsString()
-  scheme: string;
-
-  @IsString()
-  column: string;
-
-  @IsString()
-  condition: string;
-
-  @IsString()
-  value: string;
+  @IsString() scheme: string;
+  @IsString() column: string;
+  @IsString() condition: string;
+  @IsString() value: string;
 
   @IsEnum(['form', 'static'])
   valueSource: 'form' | 'static';
 }
 
 class PositionDto {
-  @IsNumber()
-  x: number;
-
-  @IsNumber()
-  y: number;
+  @IsNumber() x: number;
+  @IsNumber() y: number;
 }
 
 class MeasuredDto {
-  @IsNumber()
-  width: number;
-
-  @IsNumber()
-  height: number;
+  @IsNumber() width: number;
+  @IsNumber() height: number;
 }
 
-// === Node Data DTOs ===
+// ─────────────────────────────────────────────────────────────────────────────
+// Node Data DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
 class ConversationNodeDataDto implements ConversationNodeData {
-  @IsString()
-  label: string;
+  @IsString() label: string;
 
   @IsEnum(['start', 'message', 'question', 'condition', 'end'])
   type: 'start' | 'message' | 'question' | 'condition' | 'end';
@@ -110,40 +95,40 @@ class ConversationNodeDataDto implements ConversationNodeData {
   @IsEnum(['template', 'ia'])
   mode?: 'template' | 'ia';
 
-  @IsString()
-  message: string;
+  @IsString() message: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => FormFieldDto)
+  availableFormFields?: FormFieldDto[];
 }
 
 class InputNodeDataDto implements InputNodeData {
-  @IsString()
-  label: string;
-
-  @IsString()
-  fieldName: string;
+  @IsString() label: string;
+  @IsString() fieldName: string;
 
   @IsEnum(['text', 'number', 'date', 'select'])
   fieldType: 'text' | 'number' | 'date' | 'select';
 
-  @IsString()
-  description: string;
+  @IsString() description: string;
 
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   options?: string[];
+
+  @IsOptional() @IsBoolean() implicit?: boolean;
+
 }
 
 class FallbackNodeDataDto implements FallbackNodeData {
-  @IsString()
-  label: string;
-
-  @IsString()
-  message: string;
+  @IsString() label: string;
+  @IsString() message: string;
 }
 
 class OutputNodeDataDto implements OutputNodeData {
-  @IsString()
-  label: string;
+  @IsString() label: string;
 
   @IsArray()
   @ValidateNested({ each: true })
@@ -159,13 +144,68 @@ class OutputNodeDataDto implements OutputNodeData {
   @IsString()
   outputTemplate?: string;
 
-  @IsEnum(['raw', 'template'])
-  templateMode: 'raw' | 'template';
+  @IsEnum(['message', 'list', 'raw'])
+  templateMode: 'message' | 'list' | 'raw';
+
+  @IsOptional()
+  @IsBoolean()
+  emptyFallbackEnabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  emptyFallbackMessage?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SchemaInfoDto)
+  availableSchemas?: SchemaInfoDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => FormFieldDto)
+  availableFormFields?: FormFieldDto[];
+}
+
+class IntentDto implements Intent {
+  @IsString() id: string;
+  @IsString() label: string;
+  @IsString() description: string;
+
+  @IsOptional()
+  @IsString()
+  examples?: string;
+}
+
+class IntentNodeDataDto implements IntentNodeData {
+  @IsString() label: string;
+  @IsString() contextPrompt: string;
 
   @IsArray()
   @ValidateNested({ each: true })
-  @Type(() => SchemaInfoDTO)
-  availableSchemas: SchemaInfoDTO[];
+  @Type(() => IntentDto)
+  intents: IntentDto[];
+
+  @IsEnum(['fallback_node', 'retry', 'goto_start'])
+  fallbackBehavior: 'fallback_node' | 'retry' | 'goto_start';
+
+  @IsNumber() maxRetries: number;
+}
+
+class RouterConditionDto implements RouterCondition {
+  @IsString() field: string;
+  @IsString() operator: string;
+  @IsString() value: string;
+}
+
+class RouterNodeDataDto implements RouterNodeData {
+  @IsString() label: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RouterConditionDto)
+  conditions: RouterConditionDto[];
 
   @IsArray()
   @ValidateNested({ each: true })
@@ -173,18 +213,76 @@ class OutputNodeDataDto implements OutputNodeData {
   availableFormFields: FormFieldDto[];
 }
 
-// === Union para data ===
+class SummaryFieldDto {
+  @IsString() fieldName: string;
+  @IsString() displayLabel: string;
+}
+
+class ConfirmationNodeDataDto implements ConfirmationNodeData {
+  @IsString() label: string;
+  @IsString() confirmationMessage: string;
+  @IsString() positiveLabel: string;
+  @IsString() negativeLabel: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SummaryFieldDto)
+  summaryFields: SummaryFieldDto[];
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => FormFieldDto)
+  availableFormFields: FormFieldDto[];
+}
+
+class GoToNodeDataDto implements GoToNodeData {
+  @IsString() label: string;
+  @IsString() targetNodeId: string;
+  @IsString() targetNodeLabel: string;
+  @IsString() reason: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Union para data
+// ─────────────────────────────────────────────────────────────────────────────
+
 type NodeDataDtoUnion =
-  | InputNodeDataDto
   | ConversationNodeDataDto
+  | InputNodeDataDto
   | OutputNodeDataDto
-  | FallbackNodeDataDto;
+  | FallbackNodeDataDto
+  | IntentNodeDataDto
+  | RouterNodeDataDto
+  | ConfirmationNodeDataDto
+  | GoToNodeDataDto;
+
+function resolveDataDto(nodeType: NodeType) {
+  switch (nodeType) {
+    case 'conversationNode':  return ConversationNodeDataDto;
+    case 'inputNode':         return InputNodeDataDto;
+    case 'outputNode':        return OutputNodeDataDto;
+    case 'fallbackNode':      return FallbackNodeDataDto;
+    case 'intentNode':        return IntentNodeDataDto;
+    case 'routerNode':        return RouterNodeDataDto;
+    case 'confirmationNode':  return ConfirmationNodeDataDto;
+    case 'goToNode':          return GoToNodeDataDto;
+    default:                  return ConversationNodeDataDto;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NodeDto (UI persistence)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NODE_TYPES: NodeType[] = [
+  'conversationNode', 'intentNode', 'inputNode', 'outputNode',
+  'fallbackNode', 'routerNode', 'confirmationNode', 'goToNode',
+];
 
 class NodeDto {
-  @IsString()
-  id: string;
+  @IsString() id: string;
 
-  @IsEnum(['conversationNode', 'outputNode', 'inputNode', 'fallbackNode'])
+  @IsEnum(NODE_TYPES)
   type: NodeType;
 
   @ValidateNested()
@@ -192,77 +290,55 @@ class NodeDto {
   position: PositionDto;
 
   @ValidateNested()
-  @Type((options) => {
-    if (!options || !options.newObject) return ConversationNodeDataDto;
-
-    const nodeType = (options.newObject as NodeDto).type;
-    switch (nodeType) {
-      case 'conversationNode':
-        return ConversationNodeDataDto;
-      case 'inputNode':
-        return InputNodeDataDto;
-      case 'outputNode':
-        return OutputNodeDataDto;
-      case 'fallbackNode':
-        return FallbackNodeDataDto;
-      default:
-        return ConversationNodeDataDto;
-    }
-  })
+  @Type((options) => resolveDataDto((options?.newObject as NodeDto)?.type))
   data: NodeDataDtoUnion;
 
+  @IsOptional()
   @ValidateNested()
   @Type(() => MeasuredDto)
-  measured: MeasuredDto;
+  measured?: MeasuredDto;
 
-  @IsOptional()
-  @IsBoolean()
-  selected?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  dragging?: boolean;
+  @IsOptional() @IsBoolean() selected?: boolean;
+  @IsOptional() @IsBoolean() dragging?: boolean;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EdgeDto
+// ─────────────────────────────────────────────────────────────────────────────
+
 class EdgeDto {
-  @IsString()
-  id: string;
-
-  @IsString()
-  source: string;
-
-  @IsString()
-  target: string;
-
-  @IsEnum(['default', 'custom', 'fallback'])
-  type: 'default' | 'custom' | 'fallback';
+  @IsString() id: string;
+  @IsString() source: string;
+  @IsString() target: string;
 
   @IsOptional()
+  @IsString()
+  sourceHandle?: string;
+
+  @IsEnum(['default', 'fallback', 'jump'])
+  type: 'default' | 'fallback' | 'jump';
+
+  @IsOptional()
+  @IsObject()
+  data?: Record<string, any>;
+
+  @IsOptional()
+  @IsObject()
   style?: Record<string, any>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MappedNode2Dto — árbol recursivo
+// ─────────────────────────────────────────────────────────────────────────────
+
 class MappedNode2Dto {
-  @IsEnum(['conversationNode', 'outputNode', 'inputNode', 'fallbackNode'])
+  @IsString() id: string;
+
+  @IsEnum(NODE_TYPES)
   type: NodeType;
 
   @ValidateNested()
-  @Type((options) => {
-    if (!options || !options.newObject) return ConversationNodeDataDto;
-
-    const nodeType = (options.newObject as MappedNode2Dto).type;
-    switch (nodeType) {
-      case 'conversationNode':
-        return ConversationNodeDataDto;
-      case 'inputNode':
-        return InputNodeDataDto;
-      case 'outputNode':
-        return OutputNodeDataDto;
-      case 'fallbackNode':
-        return FallbackNodeDataDto;
-      default:
-        return ConversationNodeDataDto;
-    }
-  })
+  @Type((options) => resolveDataDto((options?.newObject as MappedNode2Dto)?.type))
   data: NodeDataDtoUnion;
 
   @IsOptional()
@@ -270,7 +346,22 @@ class MappedNode2Dto {
   @ValidateNested({ each: true })
   @Type(() => MappedNode2Dto)
   next?: MappedNode2Dto[];
+
+  // class-validator no soporta ValidateNested en Records dinámicos;
+  // la validación profunda de branches se delega a buildFlowRuntime.
+  @IsOptional()
+  @IsObject()
+  branches?: Record<string, MappedNode2Dto>;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MappedNode2Dto)
+  fallback?: MappedNode2Dto;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateMapflowDto
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class CreateMapflowDto {
   @IsString()

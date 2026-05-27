@@ -113,7 +113,7 @@ export class PersistenceService {
    */
   async getTenantModel<T>(
     companyId: string,
-    modelName: string,
+    modelName: 'Mapflow'|'BotConfig'|'Schema'|'Document'|'WidgetConfig'|'FlowRuntime'|'Mapflow',
     schema: any,
   ): Promise<Model<T>> {
     const connection = await this.getMongoConnection(companyId);
@@ -123,3 +123,4 @@ export class PersistenceService {
     return connection.model<T>(modelName, schema);
   }
 }
+
