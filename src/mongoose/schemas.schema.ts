@@ -20,30 +20,28 @@ export class SchemaModel {
   @Prop({ required: true })
   category!: string; // inventory | agenda | article
 
-  @Prop({
-    required: true,
-    validate: [(v) => v.length > 0, 'fields must have at least one item'],
-    type: [
-      {
-        name: { type: String, required: true },
-        type: { 
-          type: String, 
-          enum: ['string', 'number', 'boolean', 'json', 'date'], 
-          required: true 
-        },
-        required: { type: Boolean, default: false },
-        unique: { type: Boolean, default: false },
-        description: { type: String, required: false },  // ← agregar esto
-      },
-    ],
-  })
-  fields!: Array<{
-    name: string;
-    type: 'string' | 'number' | 'boolean' | 'json' | 'date';
-    required: boolean;
-    unique?: boolean;
-     description?: string;  // ← y aquí
-  }>;
+@Prop({
+  required: true,
+  validate: [(v) => v.length > 0, 'fields must have at least one item'],
+  type: [
+    {
+      name:        { type: String, required: true },
+      type:        { type: String, enum: ['string', 'number', 'boolean', 'json', 'date'], required: true },
+      required:    { type: Boolean, default: false },
+      unique:      { type: Boolean, default: false },
+      description: { type: String, required: false },
+      auto: { type: String, enum: ['uuid', 'timestamp', 'batch_id', ''], required: false },
+    },
+  ],
+})
+fields!: Array<{
+  name:         string;
+  type:         'string' | 'number' | 'boolean' | 'json' | 'date';
+  required:     boolean;
+  unique?:      boolean;
+  description?: string;
+  auto?:        'uuid' | 'timestamp' | 'batch_id' | '';
+}>;
 
   @Prop({ default: false })
   deleted!: boolean;

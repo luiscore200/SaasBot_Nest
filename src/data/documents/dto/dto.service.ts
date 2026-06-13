@@ -29,9 +29,11 @@ export class DtoService {
     partial: boolean,
   ) {
     for (const field of schema.fields) {
+      // ── Campos auto: nunca son requeridos desde el usuario ─────────────
+      if (field.auto) continue;
+
       const value = data[field.name];
 
-      // 👇 Si es modo partial, no exige el campo requerido si no viene.
       if (!partial && field.required && value === undefined) {
         throw new BadRequestException(`Field "${field.name}" is required.`);
       }
@@ -39,41 +41,38 @@ export class DtoService {
       if (value !== undefined) {
         switch (field.type) {
           case 'string':
-            if (typeof value !== 'string') {
+            if (typeof value !== 'string')
               throw new BadRequestException(`Field "${field.name}" must be string.`);
-            }
             break;
           case 'number':
-            if (typeof value !== 'number') {
+            if (typeof value !== 'number')
               throw new BadRequestException(`Field "${field.name}" must be number.`);
-            }
             break;
           case 'boolean':
-            if (typeof value !== 'boolean') {
+            if (typeof value !== 'boolean')
               throw new BadRequestException(`Field "${field.name}" must be boolean.`);
-            }
             break;
           case 'json':
-            if (typeof value !== 'object' || Array.isArray(value)) {
+            if (typeof value !== 'object' || Array.isArray(value))
               throw new BadRequestException(`Field "${field.name}" must be object.`);
-            }
             break;
           case 'date':
-            if (isNaN(Date.parse(value))) {
+            if (isNaN(Date.parse(value)))
               throw new BadRequestException(`Field "${field.name}" must be valid date.`);
-            }
             break;
         }
       }
     }
 
     if (strict) {
-      const allowed = schema.fields.map(f => f.name);
+      // ── Solo campos sin auto cuentan como "permitidos desde el usuario" ─
+      const allowed = schema.fields
+        .filter(f => !f.auto)
+        .map(f => f.name);
+
       const extra = Object.keys(data).filter(k => !allowed.includes(k));
       if (extra.length > 0) {
-        throw new BadRequestException(
-          `Unknown fields: ${extra.join(', ')}`,
-        );
+        throw new BadRequestException(`Unknown fields: ${extra.join(', ')}`);
       }
     }
   }

@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// engine/chat.engine.ts
+// engine/chat.engine.ts  (v4 — mensajes tipados con paginación por burbuja)
 // ─────────────────────────────────────────────────────────────────────────────
 import {
   Injectable,
@@ -7,20 +7,17 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-// Schemas Mongo
 import { ChatbotSchema, ChatbotModel } from '../mongoose/chatbot.schema';
 import { MapflowModel, MapflowModelSchema } from '../mongoose/mapflows.schema';
 import { FlowRuntime, FlowRuntimeSchema } from '../mongoose/runtimes.schema';
-import { WidgetConfigModel, WidgetConfigDocument } from '../mongoose/widgetConfig.schema';
 
-// Engine internals
 import { SessionService } from './session/session.service';
 import { ContextService } from './context/context.service';
 import { NodeResult, NodeService } from './node/node.service';
 
-// Types
 import {
   BotRuntimeConfig,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   ChatSession,
@@ -29,8 +26,12 @@ import {
   ChannelType,
   NodeType,
   FormState,
+  PaginationEntry,
 } from './engine.types';
+
 import { PersistenceService } from 'src/common/services/percistence/persistence.service';
+
+const PAGINATION_KEY = '__pagination';
 
 @Injectable()
 export class EngineService {
@@ -58,25 +59,23 @@ export class EngineService {
       return this.endResponse(session, '¡Hemos llegado al límite de esta conversación!');
     }
 
+    // ── Intercepción de paginación ────────────────────────────────────────
+    if (request.paginateNodeId) {
+      return this.processPagination(session, request.paginateNodeId);
+    }
+
+    // ── Flujo normal ──────────────────────────────────────────────────────
     const result = await this.runNodeChain(session, request.message);
 
     if (Object.keys(result.data).length > 0) {
       this.SessionService.mergeFormState(session.sessionId, result.data);
     }
 
-    // FIX: solo registrar el turno si hay un mensaje real que mostrar al usuario.
-    // Un message:"" ocurre cuando el intentNode reconoce el intent y pasa
-    // directo al siguiente nodo sin decirle nada al usuario — no debe quedar
-    // en el historial ni emitirse como burbuja vacía.
-    if (result.message.trim()) {
-      this.SessionService.pushTurn(session.sessionId, request.message, result.message);
+    const nonEmptyTexts = result.chatMessages.map(m => m.text).filter(t => t?.trim());
+    if (nonEmptyTexts.length > 0) {
+      this.SessionService.pushTurn(session.sessionId, request.message, nonEmptyTexts);
     }
 
-    // FIX: mover el setCurrentNode AQUÍ, al final de process(), en lugar de
-    // hacerlo dentro de runNodeChain. De este modo el puntero de nodo solo
-    // avanza DESPUÉS de que la respuesta ya fue construida y entregada,
-    // evitando que el siguiente turno del usuario encuentre el nodo en un
-    // estado "ya ejecutado" cuando el mensaje anterior llegó vacío.
     if (result.nextNodeId) {
       this.SessionService.setCurrentNode(session.sessionId, result.nextNodeId);
     }
@@ -86,52 +85,97 @@ export class EngineService {
       this.SessionService.destroy(session.sessionId);
     }
 
+    const fallback: ChatMessage = { text: 'Procesando tu solicitud...' };
+    const finalMessages = result.chatMessages.filter(m => m.text?.trim());
+    if (finalMessages.length === 0) finalMessages.push(fallback);
+
     return {
-      // FIX: nunca devolver un message vacío al cliente. Si el chain produjo
-      // cadena vacía (caso raro de LLM malformado), usar un fallback genérico
-      // en lugar de emitir una burbuja vacía en el frontend.
-      message: result.message.trim() || 'Procesando tu solicitud...',
-      sessionId: session.sessionId,
+      message:     finalMessages[finalMessages.length - 1].text,
+      messages:    finalMessages,
+      sessionId:   session.sessionId,
       currentNode: result.nextNodeId ?? session.currentNodeId,
-      formState: session.formState,
-      done: conversationDone,
+      formState:   session.formState,
+      done:        conversationDone,
     };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Nodos que avanzan automáticamente sin esperar input del usuario.
-  //
-  // conversationNode se incluye aquí pero tiene lógica interna adicional:
-  //   - type='start'   → siempre avanza automáticamente
-  //   - type='message' → avanza automáticamente (saluda/informa y pasa)
-  //   - type='question'→ BLOQUEA — espera respuesta del usuario
-  //
-  // La distinción la hace shouldBlockConversationNode() más abajo.
-  //
-  // FIX: inputNode NO estaba en esta lista, lo que causaba que el chain
-  // rompiera apenas el intentNode resolvía hacia un inputNode, devolviendo
-  // message:"" al cliente. Se maneja con lógica especial en el while para
-  // permitir el paso solo cuando implicit=true.
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Procesamiento de paginación ───────────────────────────────────────────
+  // Fuerza el puntero al outputNode solicitado y ejecuta el chain desde ahí.
+  // El conversationNode siguiente se ejecuta en el mismo chain, así el turno
+  // devuelve tanto el listado (con botón) como el mensaje de seguimiento.
+
+  private async processPagination(
+    session: ChatSession,
+    nodeId: string,
+  ): Promise<ChatResponse> {
+    const node = session.config.runtimeNodes[nodeId];
+    if (!node || node.type !== 'outputNode') {
+      this.logger.warn(`[paginate] nodeId="${nodeId}" no es un outputNode válido`);
+      return this.endResponse(session, 'No se pudo cargar más información.');
+    }
+
+    this.SessionService.setCurrentNode(session.sessionId, nodeId);
+
+    const result = await this.runNodeChain(session, '');
+
+    const nonEmptyTexts = result.chatMessages.map(m => m.text).filter(t => t?.trim());
+    if (nonEmptyTexts.length > 0) {
+      this.SessionService.pushTurn(session.sessionId, '[ver más]', nonEmptyTexts);
+    }
+
+    if (result.nextNodeId) {
+      this.SessionService.setCurrentNode(session.sessionId, result.nextNodeId);
+    }
+
+    const fallback: ChatMessage = { text: 'Procesando...' };
+    const finalMessages = result.chatMessages.filter(m => m.text?.trim());
+    if (finalMessages.length === 0) finalMessages.push(fallback);
+
+    return {
+      message:     finalMessages[finalMessages.length - 1].text,
+      messages:    finalMessages,
+      sessionId:   session.sessionId,
+      currentNode: result.nextNodeId ?? nodeId,
+      formState:   session.formState,
+      done:        false,
+    };
+  }
+
+  // ── Nodos que avanzan automáticamente ────────────────────────────────────
+
   private readonly AUTO_ADVANCE_NODES: NodeType[] = [
-    'outputNode', 'goToNode', 'fallbackNode', 'routerNode', 'conversationNode',
+    'outputNode', 'goToNode', 'fallbackNode', 'routerNode', 'conversationNode', 'insertNode', 'apiNode'
   ];
+
+  // ── Chain de nodos ────────────────────────────────────────────────────────
+  // Ahora acumula ChatMessage[] en lugar de string[].
+  // Cada nodo genera su propio ChatMessage; el outputNode incluye pagination
+  // cuando hasMore=true, lo que el frontend usa para saber exactamente en qué
+  // burbuja poner el botón "ver más".
 
   private async runNodeChain(
     session: ChatSession,
     userMessage: string,
-  ): Promise<NodeResult & { data: FormState }> {
+  ): Promise<NodeResult & { data: FormState; chatMessages: ChatMessage[] }> {
     let node = await this.resolveCurrentNode(session);
-    let messages = this.ContextService.build(session, node);
+    let contextMessages = this.ContextService.build(session, node);
 
     if (node.type !== 'intentNode') {
       session.formState['__previousNodeId'] = session.currentNodeId;
     }
 
-    let result = await this.NodeService.run({ session, node, userMessage, contextMessages: messages });
+    let result = await this.NodeService.run({
+      session, node, userMessage, contextMessages,
+    });
 
     if (Object.keys(result.data).length > 0) {
       this.SessionService.mergeFormState(session.sessionId, result.data);
+    }
+
+    // Construir el ChatMessage del nodo actual
+    const chatMessages: ChatMessage[] = [];
+    if (result.message.trim()) {
+      chatMessages.push(this.buildChatMessage(result, node));
     }
 
     const MAX_CHAIN = 5;
@@ -141,26 +185,20 @@ export class EngineService {
       const nextNode = session.config.runtimeNodes[result.nextNodeId];
       if (!nextNode) break;
 
-      // FIX: inputNode implicit se permite avanzar automáticamente.
-      // Un inputNode con implicit=true busca el valor en el historial antes
-      // de preguntar — si lo encuentra, devuelve done:true con message:""
-      // y debe continuar hacia el outputNode sin bloquear el chain.
-      // Un inputNode con implicit=false (o sin implicit) SÍ bloquea porque
-      // necesita esperar la respuesta explícita del usuario.
       const isImplicitInput =
         nextNode.type === 'inputNode' && nextNode.data?.implicit === true;
 
-      if (!this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) && !isImplicitInput) {
+      const isAutoConfirmation =
+       nextNode.type === 'confirmationNode' &&
+       chatMessages.filter(m => m.text?.trim()).length === 0;
+
+
+      if (!this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) && !isImplicitInput &&   !isAutoConfirmation ) {
         break;
       }
 
-      // conversationNode: solo bloquear si type='question'
       if (this.shouldBlockConversationNode(nextNode)) break;
 
-      // FIX: NO llamar setCurrentNode aquí. El puntero se mueve en process()
-      // después de que la respuesta completa ya fue construida. Actualizar
-      // solo la variable local para que los siguientes nodos del chain tengan
-      // el contexto correcto de sesión.
       session = {
         ...session,
         currentNodeId: result.nextNodeId,
@@ -168,92 +206,61 @@ export class EngineService {
       };
 
       node = nextNode;
-      messages = this.ContextService.build(session, node);
+      contextMessages = this.ContextService.build(session, node);
 
       if (node.type !== 'intentNode') {
         session.formState['__previousNodeId'] = session.currentNodeId;
       }
 
       const nextResult = await this.NodeService.run({
-        session, node, userMessage, contextMessages: messages,
+        session, node, userMessage, contextMessages,
       });
 
       if (Object.keys(nextResult.data).length > 0) {
         this.SessionService.mergeFormState(session.sessionId, nextResult.data);
       }
 
-      // ── Resolución del mensaje del chain ────────────────────────────────
-      //
-      // Reglas de concatenación:
-      //
-      // 1. Si alguno de los dos mensajes es vacío → usar el que tiene contenido.
-      //
-      // 2. Si el NODO PREVIO era un conversationNode informacional (type='message'
-      //    o 'start', mode='ia') y el nodo siguiente produce un mensaje real →
-      //    el mensaje del conversationNode se DESCARTA.
-      //    Razón: el conversationNode con mode='ia' genera una respuesta
-      //    contextual del LLM ("Sí, tenemos aspirina...") basada en el historial,
-      //    pero su único rol en el flujo es hacer la transición hacia el intentNode.
-      //    El mensaje real que debe llegar al usuario es el del outputNode, no el
-      //    del conversationNode que "adivinó" la respuesta antes de tiempo.
-      //
-      // 3. Si el NODO SIGUIENTE es un conversationNode informacional →
-      //    el mensaje del siguiente reemplaza al anterior (mismo razonamiento).
-      //
-      // 4. En cualquier otro caso con ambos mensajes presentes → concatenar.
-
-      const prevMsg = result.message?.trim()     ?? '';
-      const nextMsg = nextResult.message?.trim() ?? '';
-
-      const prevIsInformationalConversation =
-        node.type === 'conversationNode' &&
-        (node.data?.type === 'message' || node.data?.type === 'start');
-
-      const nextIsInformationalConversation =
-        nextNode.type === 'conversationNode' &&
-        (nextNode.data?.type === 'message' || nextNode.data?.type === 'start');
-
-      let combinedMessage: string;
-      if (!prevMsg || !nextMsg) {
-        // Uno de los dos está vacío — usar el que tiene contenido
-        combinedMessage = nextMsg || prevMsg;
-      } else if (prevIsInformationalConversation || nextIsInformationalConversation) {
-        // El conversationNode informacional cede al mensaje del otro nodo
-        combinedMessage = nextMsg;
-      } else {
-        // Ambos tienen contenido y ninguno es conversationNode informacional
-        combinedMessage = `${prevMsg}\n\n${nextMsg}`;
+      if (nextResult.message.trim()) {
+        chatMessages.push(this.buildChatMessage(nextResult, node));
       }
 
-      result = {
-        ...nextResult,
-        message: combinedMessage,
-      };
-
+      result = nextResult;
       chainCount++;
     }
 
-    return { ...result, data: session.formState };
+    return {
+      ...result,
+      message:      chatMessages[chatMessages.length - 1]?.text ?? '',
+      chatMessages,
+      data:         session.formState,
+    };
   }
 
   /**
-   * Determina si un conversationNode debe bloquear el chain y esperar
-   * input del usuario, o si puede avanzar automáticamente.
-   *
-   * Bloquea solo cuando type='question' — el bot hizo una pregunta
-   * y necesita la respuesta del usuario para continuar.
-   *
-   * start   → saludo inicial, avanza solo
-   * message → informa/saluda con IA, avanza solo al siguiente nodo
-   * question→ pregunta explícita, espera respuesta
+   * Construye un ChatMessage a partir del resultado de un nodo.
+   * Si el nodo es outputNode y tiene paginación activa, la adjunta al mensaje.
    */
-  private shouldBlockConversationNode(node: RuntimeNode): boolean {
-    if (node.type !== 'conversationNode') return false;
-    const nodeType = node.data?.type as string | undefined;
-    return nodeType === 'question';
+  private buildChatMessage(
+    result: NodeResult & { pagination?: PaginationEntry },
+    node: RuntimeNode,
+  ): ChatMessage {
+    const msg: ChatMessage = { text: result.message.trim() };
+
+    // La paginación solo viaja en el mensaje del outputNode que la generó
+    const pagination = (result as any).pagination as PaginationEntry | undefined;
+    if (node.type === 'outputNode' && pagination?.hasMore) {
+      msg.pagination = pagination;
+    }
+
+    return msg;
   }
 
-  // ── Resolución de sesión ───────────────────────────────────────────────────
+  private shouldBlockConversationNode(node: RuntimeNode): boolean {
+    if (node.type !== 'conversationNode') return false;
+    return (node.data?.type as string | undefined) === 'question';
+  }
+
+  // ── Resolución de sesión ──────────────────────────────────────────────────
 
   private async resolveSession(
     companyId: string,
@@ -298,7 +305,6 @@ export class EngineService {
     const mapFlowModel = await this.persistence.getTenantModel<MapflowModel>(
       companyId, 'Mapflow', MapflowModelSchema,
     );
-
     const mapflow = await mapFlowModel
       .findById(bot.mapflowId.toString())
       .lean<MapflowModel & { _id: any }>()
@@ -314,7 +320,6 @@ export class EngineService {
     const runtimeModel = await this.persistence.getTenantModel<FlowRuntime>(
       companyId, 'FlowRuntime', FlowRuntimeSchema,
     );
-
     const flowRuntime = await runtimeModel
       .findOne({ flowDefinitionId: bot.mapflowId.toString(), active: true })
       .sort({ version: -1 })
@@ -329,25 +334,25 @@ export class EngineService {
     }
 
     const formFields: FormFieldDef[] = (mapflow.formFields ?? []).map((f: any) => ({
-      name: f.name,
-      type: f.type,
-      label: f.label ?? f.name,
+      name:     f.name,
+      type:     f.type,
+      label:    f.label ?? f.name,
       required: f.required ?? false,
     }));
 
     const config: BotRuntimeConfig = {
-      botConfigId: String(bot._id),
-      company_id: bot.company_id,
-      name: bot.name,
-      description: bot.description,
-      instructions: bot.instructions,
-      type: bot.type,
-      maxTurns: bot.maxTurns,
+      botConfigId:     String(bot._id),
+      company_id:      bot.company_id,
+      name:            bot.name,
+      description:     bot.description,
+      instructions:    bot.instructions,
+      type:            bot.type,
+      maxTurns:        bot.maxTurns,
       selectedSchemas: bot.selectedSchemas ?? [],
-      mapflowId: String(bot.mapflowId),
+      mapflowId:       String(bot.mapflowId),
       formFields,
-      startNode: flowRuntime.startNode,
-      runtimeNodes: flowRuntime.nodes as Record<string, RuntimeNode>,
+      startNode:       flowRuntime.startNode,
+      runtimeNodes:    flowRuntime.nodes as Record<string, RuntimeNode>,
     };
 
     this.logger.log(
@@ -357,7 +362,7 @@ export class EngineService {
     return config;
   }
 
-  // ── Resolución de nodo actual ──────────────────────────────────────────────
+  // ── Resolución de nodo actual ─────────────────────────────────────────────
 
   private async resolveCurrentNode(session: ChatSession): Promise<RuntimeNode> {
     const node = session.config.runtimeNodes[session.currentNodeId];
@@ -370,15 +375,16 @@ export class EngineService {
     return node;
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
-  private endResponse(session: ChatSession, message: string): ChatResponse {
+  private endResponse(session: ChatSession, text: string): ChatResponse {
     return {
-      message,
-      sessionId: session.sessionId,
+      message:     text,
+      messages:    [{ text }],
+      sessionId:   session.sessionId,
       currentNode: session.currentNodeId,
-      formState: session.formState,
-      done: true,
+      formState:   session.formState,
+      done:        true,
     };
   }
 }

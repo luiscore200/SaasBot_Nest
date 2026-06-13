@@ -19,6 +19,7 @@ import { CascadeService } from './cascade.service';
 
 @Module({
   imports: [MongooseModelsModule,CommonModule,EmbeddingModule,IndexingModule],
+  exports:[DocumentsService],
   controllers: [SchemasController,DocumentsController, MapflowController, ChatbotController, WidgetConfigController],
   providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService, WidgetConfigService, CascadeService],
 })

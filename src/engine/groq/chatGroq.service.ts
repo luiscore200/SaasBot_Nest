@@ -4,12 +4,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { GroqService as groqq } from 'src/groq/groq.service';
 import { LLMMessage, LLMStructuredResponse } from '../engine.types';
+import { GeminiService } from '../../gemini/gemini.service';
 
 @Injectable()
 export class ChatGroqService {
   private readonly logger = new Logger(ChatGroqService.name);
 
-  constructor(private readonly groq: groqq) {}
+  constructor(private readonly groq: groqq  ) {}
 
   // ── Contrato del engine: message / data / done / intent ───────────────────
 

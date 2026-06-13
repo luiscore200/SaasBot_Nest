@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// engine/node/output/output.handler.ts
+// engine/node/output/output.handler.ts  (v4 — caché en sesión)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Logger } from '@nestjs/common';
@@ -7,53 +7,187 @@ import { RunnerContext, NodeResult } from '../node.service';
 import { ChatGroqService } from '../../groq/chatGroq.service';
 import { DataResolverService, ResolvedDocument, ResolveParams } from './dataResolver.service';
 import { FormState } from '../../engine.types';
+import { SessionService } from '../../session/session.service';
 
 const logger = new Logger('OutputNodeHandler');
 const DEFAULT_PAGE_SIZE = 5;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tipos de paginación múltiple
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PaginationEntry {
+  nodeId: string;
+  hasMore: boolean;
+  currentPage: number;
+}
+
+// Clave en formState donde se guarda el mapa de paginación (solo páginas, no docs)
+const PAGINATION_KEY = '__pagination';
+
+function getPaginationMap(formState: FormState): Record<string, number> {
+  const raw = formState[PAGINATION_KEY];
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, number>;
+  }
+  return {};
+}
+
+function setPaginationPage(formState: FormState, nodeId: string, page: number): void {
+  const map = getPaginationMap(formState);
+  map[nodeId] = page;
+  formState[PAGINATION_KEY] = map;
+}
+
+function clearPaginationEntry(formState: FormState, nodeId: string): void {
+  const map = getPaginationMap(formState);
+  delete map[nodeId];
+  formState[PAGINATION_KEY] = map;
+}
+
+function getCurrentPage(formState: FormState, nodeId: string): number {
+  return getPaginationMap(formState)[nodeId] ?? 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function runOutputNode(
   ctx: RunnerContext,
   groq: ChatGroqService,
   dataResolver: DataResolverService,
-): Promise<NodeResult> {
+  sessionService: SessionService,
+): Promise<NodeResult & { pagination?: PaginationEntry }> {
   const { data } = ctx.node;
   const { session } = ctx;
 
   const templateMode: 'raw' | 'message' | 'list' = data.templateMode ?? 'raw';
   const pageSize: number = data.pageSize ?? DEFAULT_PAGE_SIZE;
-  const pageKey = `__page_${ctx.node.id}`;
+  const nodeId = ctx.node.id;
 
-  logger.log(`[ENTRY] nodeId="${ctx.node.id}" templateMode="${templateMode}" userMessage="${ctx.userMessage}"`);
+  logger.log(`[ENTRY] nodeId="${nodeId}" templateMode="${templateMode}" userMessage="${ctx.userMessage}"`);
 
-  // ── Paginación activa ─────────────────────────────────────────────────────
-  if (pageKey in session.formState) {
-    logger.log(`[PAGINATION] pageKey="${pageKey}" currentValue=${session.formState[pageKey]}`);
-    const wantsMore = await detectMoreRequest(ctx, groq);
-    logger.log(`[PAGINATION] wantsMore=${wantsMore}`);
-    if (wantsMore) {
-      session.formState[pageKey] = ((session.formState[pageKey] as number) ?? 1) + 1;
-    } else {
-      delete session.formState[pageKey];
-      return {
-        message: '¿En qué más puedo ayudarte?',
-        data: {},
-        done: true,
-        nextNodeId: ctx.node.branches?.['success'] ?? ctx.node.next?.[0],
-      };
-    }
-  } else {
-    session.formState[pageKey] = 1;
+  // ── Calcular página actual ────────────────────────────────────────────────
+  const existingPage = getCurrentPage(session.formState, nodeId);
+  const currentPage  = existingPage > 0 ? existingPage + 1 : 1;
+
+  logger.log(`[PAGINATION] nodeId="${nodeId}" existingPage=${existingPage} → currentPage=${currentPage}`);
+
+  setPaginationPage(session.formState, nodeId, currentPage);
+
+  // ── Delegación por modo ───────────────────────────────────────────────────
+  if (templateMode === 'list') {
+    return runListMode(ctx, groq, dataResolver, sessionService, pageSize, currentPage);
   }
 
-  const currentPage = session.formState[pageKey] as number;
+  if (templateMode === 'message') {
+    return runMessageMode(ctx, groq, dataResolver);
+  }
 
-  // ── rawCall #1: estrategia de búsqueda ────────────────────────────────────
-  logger.log(`[STRATEGY] Llamando decideSearchStrategy...`);
+  // raw — JSON directo, sin LLM, sin template
+  return runRawMode(ctx, dataResolver, pageSize, currentPage);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIST MODE — determinístico + acumulación de caché en sesión
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runListMode(
+  ctx: RunnerContext,
+  groq: ChatGroqService,
+  dataResolver: DataResolverService,
+  sessionService: SessionService,
+  pageSize: number,
+  currentPage: number,
+): Promise<NodeResult & { pagination?: PaginationEntry }> {
+  const { data, id: nodeId } = ctx.node;
+  const { session } = ctx;
+
+  let resolved: ResolvedDocument[];
+  try {
+    resolved = await dataResolver.resolve({
+      companyId:         session.company_id,
+      schemes:           data.schemes ?? [],
+      globalCriteria:    data.globalCriteria ?? [],
+      formState:         session.formState,
+      useSemanticSearch: false,
+      page:              currentPage,
+      pageSize,
+    } satisfies ResolveParams);
+  } catch (err: any) {
+    logger.error(`[LIST] resolve ERROR: ${err.message}`);
+    clearPaginationEntry(session.formState, nodeId);
+    return errorResult(ctx, data, session.formState);
+  }
+
+  const totalDocs = resolved.reduce((s, r) => s + r.documents.length, 0);
+
+  if (totalDocs === 0) {
+    clearPaginationEntry(session.formState, nodeId);
+    const emptyMsg = resolveTemplate(
+      data.emptyFallbackEnabled
+        ? (data.emptyFallbackMessage ?? 'No encontré resultados.')
+        : 'No encontré resultados.',
+      session.formState,
+    );
+    return {
+      message: emptyMsg,
+      data: {},
+      done: true,
+      nextNodeId: ctx.node.branches?.['empty'] ?? ctx.node.next?.[0],
+    };
+  }
+
+  const hasMore   = resolved.some(r => r.hasMore);
+  const documents = resolved.flatMap(r => r.documents);
+  const outputTemplate = (data.outputTemplate ?? '').trim();
+
+  // ── Formateo determinístico para el mensaje al usuario ───────────────────
+  const message = buildDeterministicList(documents, outputTemplate);
+  logger.log(`[LIST] determinístico — docs=${documents.length} hasMore=${hasMore}`);
+
+  // ── Acumular documentos CRUDOS en el caché de la sesión ──────────────────
+  // Se guardan sin template, sin formatear — el inputNode con extractFromNodeId
+  // los recibe tal cual para que el LLM pueda extraer campos específicos.
+  sessionService.appendOutputCache(session.sessionId, nodeId, documents);
+
+  if (!hasMore) {
+    clearPaginationEntry(session.formState, nodeId);
+  }
+
+  const successNextId = ctx.node.branches?.['success'] ?? ctx.node.next?.[0];
+
+  return {
+    message,
+    data:       {},
+    done:       true,
+    nextNodeId: successNextId,
+    pagination: hasMore
+      ? { nodeId, hasMore: true, currentPage }
+      : undefined,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGE MODE — búsqueda semántica + LLM escrutina coherencia + template
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runMessageMode(
+  ctx: RunnerContext,
+  groq: ChatGroqService,
+  dataResolver: DataResolverService,
+): Promise<NodeResult & { pagination?: PaginationEntry }> {
+  const { data, id: nodeId } = ctx.node;
+  const { session } = ctx;
+
+  clearPaginationEntry(session.formState, nodeId); // message nunca pagina
+
+  // ── 1. Decidir estrategia de búsqueda ────────────────────────────────────
   const searchDecision = await decideSearchStrategy(ctx, groq);
-  logger.log(`[STRATEGY] result=${JSON.stringify(searchDecision)}`);
+  logger.log(`[MESSAGE] searchDecision=${JSON.stringify(searchDecision)}`);
 
-  // ── Resolver documentos (incluye re-ranking LLM para búsqueda semántica) ──
-  logger.log(`[RESOLVE] Llamando dataResolver.resolve() page=${currentPage}...`);
+  // ── 2. Resolver — top 3 candidatos ───────────────────────────────────────
   let resolved: ResolvedDocument[];
   try {
     resolved = await dataResolver.resolve({
@@ -63,32 +197,24 @@ export async function runOutputNode(
       formState:         session.formState,
       searchQuery:       searchDecision.searchQuery ?? undefined,
       useSemanticSearch: searchDecision.useSemanticSearch,
-      page:              currentPage,
-      pageSize,
+      page:     1,
+      pageSize: 3,
     } satisfies ResolveParams);
-    logger.log(
-      `[RESOLVE] OK — schemas=${resolved.length} ` +
-      `totalDocs=${resolved.reduce((s, r) => s + r.documents.length, 0)} ` +
-      `(post re-ranking)`,
-    );
   } catch (err: any) {
-    logger.error(`[RESOLVE] ERROR: ${err.message}`);
-    delete session.formState[pageKey];
+    logger.error(`[MESSAGE] resolve ERROR: ${err.message}`);
     return errorResult(ctx, data, session.formState);
   }
 
-  const totalDocs = resolved.reduce((sum, r) => sum + r.documents.length, 0);
+  const candidates = resolved.flatMap(r => r.documents);
+  logger.log(`[MESSAGE] candidatos=${candidates.length}`);
 
-  // ── Sin resultados ────────────────────────────────────────────────────────
-  if (totalDocs === 0) {
-    logger.log(`[EMPTY] Sin resultados — emptyFallbackEnabled=${data.emptyFallbackEnabled}`);
-    delete session.formState[pageKey];
-
-    const rawEmptyMsg = data.emptyFallbackEnabled
-      ? (data.emptyFallbackMessage ?? 'No encontré resultados para tu búsqueda.')
-      : 'No encontré resultados para tu búsqueda.';
-    const emptyMsg = resolveTemplate(rawEmptyMsg, session.formState);
-
+  if (!candidates.length) {
+    const emptyMsg = resolveTemplate(
+      data.emptyFallbackEnabled
+        ? (data.emptyFallbackMessage ?? 'No encontré resultados para tu búsqueda.')
+        : 'No encontré resultados para tu búsqueda.',
+      session.formState,
+    );
     return {
       message: emptyMsg,
       data: {},
@@ -97,116 +223,122 @@ export async function runOutputNode(
     };
   }
 
-  const hasMore = resolved.some(r => r.hasMore);
+  // ── 3. LLM escrutina coherencia ───────────────────────────────────────────
+  const outputTemplate = (data.outputTemplate ?? '').trim();
+  const coherenceResult = await scrutinizeCoherence(groq, candidates, ctx.userMessage, outputTemplate);
+  logger.log(`[MESSAGE] coherence=${JSON.stringify(coherenceResult)}`);
+
   const successNextId = ctx.node.branches?.['success'] ?? ctx.node.next?.[0];
 
-  // ── templateMode: raw ─────────────────────────────────────────────────────
-  if (templateMode === 'raw') {
-    logger.log(`[FORMAT] templateMode=raw → JSON directo, sin LLM`);
-    if (!hasMore) delete session.formState[pageKey];
+  if (!coherenceResult.coherent || coherenceResult.selectedIndex < 0) {
     return {
-      message: JSON.stringify(
-        resolved.map(r => ({ schemaId: r.schemaId, results: r.documents })),
-        null, 2,
-      ),
-      data: {},
-      done: !hasMore,
-      nextNodeId: hasMore ? undefined : successNextId,
+      message:    coherenceResult.message || 'No encontré resultados que coincidan con tu búsqueda.',
+      data:       {},
+      done:       true,
+      nextNodeId: ctx.node.branches?.['empty'] ?? ctx.node.next?.[0],
     };
   }
 
-  // ── templateMode: list | message ──────────────────────────────────────────
-  const outputTemplate = (data.outputTemplate ?? '').trim();
-  const documents      = resolved.flatMap(r => r.documents);
+  const selectedDoc = candidates[coherenceResult.selectedIndex];
+  const finalMessage = outputTemplate
+    ? applyTemplate(outputTemplate, selectedDoc)
+    : buildSingleDocFallback(selectedDoc);
 
-  logger.log(`[FORMAT] templateMode="${templateMode}" outputTemplate="${outputTemplate}" docs=${documents.length}`);
-  logger.log(`[FORMAT] Llamando formatWithTemplate (rawCall #2)...`);
+  logger.log(`[MESSAGE] template aplicado — doc[${coherenceResult.selectedIndex}]`);
 
-  const llmFormatted = await formatWithTemplate(groq, documents, templateMode, outputTemplate, hasMore);
+  return {
+    message:    finalMessage,
+    data:       {},
+    done:       true,
+    nextNodeId: successNextId,
+  };
+}
 
-  logger.log(`[FORMAT] rawCall resultado: ${llmFormatted === null ? 'NULL → usando fallback determinístico' : `OK (${llmFormatted.length} chars)`}`);
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW MODE — JSON directo
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const finalMessage = llmFormatted
-    ?? buildDeterministicFallback(documents, outputTemplate, templateMode);
+async function runRawMode(
+  ctx: RunnerContext,
+  dataResolver: DataResolverService,
+  pageSize: number,
+  currentPage: number,
+): Promise<NodeResult & { pagination?: PaginationEntry }> {
+  const { data, id: nodeId } = ctx.node;
+  const { session } = ctx;
 
-  logger.log(`[RESULT] finalMessage="${finalMessage.substring(0, 120)}..." hasMore=${hasMore}`);
-
-  if (hasMore) {
-    return { message: finalMessage, data: {}, done: false, nextNodeId: undefined };
+  let resolved: ResolvedDocument[];
+  try {
+    resolved = await dataResolver.resolve({
+      companyId:         session.company_id,
+      schemes:           data.schemes ?? [],
+      globalCriteria:    data.globalCriteria ?? [],
+      formState:         session.formState,
+      useSemanticSearch: false,
+      page:              currentPage,
+      pageSize,
+    } satisfies ResolveParams);
+  } catch (err: any) {
+    logger.error(`[RAW] resolve ERROR: ${err.message}`);
+    clearPaginationEntry(session.formState, nodeId);
+    return errorResult(ctx, data, session.formState);
   }
 
-  delete session.formState[pageKey];
-  return { message: finalMessage, data: {}, done: true, nextNodeId: successNextId };
+  const hasMore = resolved.some(r => r.hasMore);
+  if (!hasMore) clearPaginationEntry(session.formState, nodeId);
+
+  return {
+    message: JSON.stringify(
+      resolved.map(r => ({ schemaId: r.schemaId, results: r.documents })),
+      null, 2,
+    ),
+    data:       {},
+    done:       true,
+    nextNodeId: hasMore ? undefined : (ctx.node.branches?.['success'] ?? ctx.node.next?.[0]),
+    pagination: hasMore ? { nodeId, hasMore: true, currentPage } : undefined,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// rawCall #0 — ¿el usuario pide ver más?
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function detectMoreRequest(ctx: RunnerContext, groq: ChatGroqService): Promise<boolean> {
-  logger.log(`[detectMoreRequest] userMessage="${ctx.userMessage}"`);
-  const result = await groq.rawCall<{ wantsMore: boolean }>(
-    `Analiza si el usuario quiere ver más resultados. Responde SOLO con JSON:
-{"wantsMore": true}   ← quiere ver más, continuar, siguiente, más opciones
-{"wantsMore": false}  ← cualquier otro caso`,
-    ctx.userMessage,
-  );
-  logger.log(`[detectMoreRequest] rawCall result=${JSON.stringify(result)}`);
-  return result?.wantsMore === true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// rawCall #1 — decidir estrategia
+// LLM — decidir estrategia de búsqueda (solo para message mode)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function decideSearchStrategy(
   ctx: RunnerContext,
   groq: ChatGroqService,
 ): Promise<{ useSemanticSearch: boolean; searchQuery: string | null }> {
-  const safeUserMessage = ctx.userMessage?.trim();
-  if (!safeUserMessage || safeUserMessage === '?') {
-    logger.warn(`[decideSearchStrategy] userMessage inválido ("${ctx.userMessage}") → forzando listing`);
+  const safeMsg = ctx.userMessage?.trim();
+  if (!safeMsg || safeMsg === '?') {
     return { useSemanticSearch: false, searchQuery: null };
   }
 
-  logger.log(`[decideSearchStrategy] userMessage="${safeUserMessage}"`);
+  const result = await groq.rawCall<{
+    queryType: 'listing' | 'semantic';
+    searchQuery: string | null;
+    expandedQuery: string | null;
+  }>(
+    `Decide cómo buscar en un catálogo según el mensaje del usuario.
 
- const result = await groq.rawCall<{
-  queryType: 'listing' | 'semantic';
-  searchQuery: string | null;
-  expandedQuery: string | null;
-}>(
-  `Decide cómo buscar en un catálogo según el mensaje del usuario.
+Responde SOLO con JSON. Dos casos:
 
-Responde SOLO con JSON. Dos casos posibles:
-
-CASO 1 — el usuario menciona algo específico que busca:
+CASO 1 — el usuario menciona algo específico:
 {"queryType": "semantic", "searchQuery": "<término original>", "expandedQuery": "<términos expandidos>"}
 
 Para expandedQuery:
-- Si el usuario mencionó un nombre exacto de producto o ítem → repite el mismo término sin expandir.
-- Si el usuario describió una funcionalidad, uso, síntoma, característica o necesidad
-  en lugar de un nombre concreto → expande con nombres de productos, categorías,
-  sinónimos y términos técnicos del dominio que podrían satisfacer esa necesidad.
-  Usa tu conocimiento general para inferir qué productos o ítems resuelven lo que el usuario necesita.
+- Nombre exacto de producto → repite igual sin expandir.
+- Funcionalidad, uso, síntoma o necesidad → expande con nombres de productos,
+  categorías, sinónimos y términos técnicos del dominio.
 
-CASO 2 — el usuario quiere ver todo el catálogo o no especifica qué busca:
+CASO 2 — quiere ver todo o no especifica:
 {"queryType": "listing", "searchQuery": null, "expandedQuery": null}`,
-  safeUserMessage,
-);
-
-  logger.log(`[decideSearchStrategy] rawCall result=${JSON.stringify(result)}`);
+    safeMsg,
+  );
 
   if (!result?.queryType) {
-    logger.warn(`[decideSearchStrategy] Respuesta inválida del LLM, usando listing por defecto`);
     return { useSemanticSearch: false, searchQuery: null };
   }
 
-  // Usar expandedQuery para el embedding si está disponible, si no el searchQuery original
   const finalQuery = result.expandedQuery?.trim() || result.searchQuery;
-
-  logger.log(`[decideSearchStrategy] finalQuery="${finalQuery}" (expandedQuery="${result.expandedQuery ?? 'null'}")`);
-
   return {
     useSemanticSearch: result.queryType === 'semantic',
     searchQuery: finalQuery,
@@ -214,127 +346,133 @@ CASO 2 — el usuario quiere ver todo el catálogo o no especifica qué busca:
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// rawCall #2 — formatear con template
+// LLM — escrutinio de coherencia (solo para message mode)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function formatWithTemplate(
+async function scrutinizeCoherence(
   groq: ChatGroqService,
-  documents: Record<string, any>[],
-  templateMode: 'message' | 'list',
+  candidates: Record<string, any>[],
+  userMessage: string,
   outputTemplate: string,
-  hasMore: boolean,
-): Promise<string | null> {
-  const dataJson = JSON.stringify(documents, null, 2);
-  const moreHint = hasMore
-    ? '\nTermina preguntando al usuario si desea ver más resultados.'
-    : '';
+): Promise<{ coherent: boolean; selectedIndex: number; message: string }> {
+  const summaries = candidates.map((doc, i) => {
+    const d = doc.data ?? doc;
+    const fields = Object.entries(d)
+      .filter(([k]) => !k.startsWith('_'))
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(', ');
+    return `IDX_${i}: { ${fields} }`;
+  });
 
-  const systemPrompt = templateMode === 'list'
-    ? buildListPrompt(dataJson, outputTemplate, moreHint)
-    : buildMessagePrompt(dataJson, outputTemplate, moreHint);
+  logger.log(
+    `[scrutinize] userMessage="${userMessage}"\ncandidatos:\n${summaries.join('\n')}`,
+  );
 
-  logger.log(`[formatWithTemplate] Enviando rawCall — templateMode="${templateMode}" docs=${documents.length}`);
+  const result = await groq.rawCall<{
+    coherent: boolean;
+    selectedIndex: number;
+    message: string;
+  }>(
+    `El usuario buscó: "${userMessage}"
 
-  const result = await groq.rawCall<{ message: string }>(systemPrompt);
+Candidatos recuperados:
+${summaries.join('\n')}
 
-  logger.log(`[formatWithTemplate] rawCall result=${JSON.stringify(result)}`);
+Determina si algún candidato es genuinamente relevante para lo que el usuario busca.
 
-  if (typeof result?.message !== 'string' || !result.message.trim()) {
-    logger.warn(`[formatWithTemplate] LLM devolvió message inválido: ${JSON.stringify(result)}`);
-    return null;
+Un candidato ES relevante si:
+- Su nombre, descripción o atributos coinciden directa o parcialmente con la búsqueda
+- Es un producto/ítem que satisface la necesidad, uso o función descrita
+- Es sinónimo, nombre comercial o variante conocida de lo buscado
+
+REGLAS:
+- Si encuentras uno coherente → {"coherent": true, "selectedIndex": <índice>, "message": ""}
+- Si ninguno es coherente     → {"coherent": false, "selectedIndex": -1, "message": "<mensaje natural al usuario>"}
+- Selecciona SOLO UN índice — el más relevante.
+
+Responde ÚNICAMENTE con JSON (sin markdown):`,
+  );
+
+  if (!result) {
+    return { coherent: false, selectedIndex: -1, message: 'No encontré resultados que coincidan con tu búsqueda.' };
   }
 
-  return result.message.trim();
+  return {
+    coherent:      result.coherent === true,
+    selectedIndex: typeof result.selectedIndex === 'number' ? result.selectedIndex : -1,
+    message:       result.message ?? '',
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Prompts
+// Helpers de formateo determinístico
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildListPrompt(dataJson: string, outputTemplate: string, moreHint: string): string {
-  const templateSection = outputTemplate
-    ? `PLANTILLA POR ÍTEM (aplícala a cada objeto, reemplaza \${campo} con su valor):
-"${outputTemplate}"
-
-Ejemplo — si la plantilla es "\${nombre} — \${miligramos}mg" y hay 3 items:
-1. acetaminofen — 100mg
-2. aspirina — 200mg
-3. dolex — 200mg`
-    : `Genera una lista numerada clara. Por cada ítem muestra todos sus campos disponibles.`;
-
-  return `Eres un formateador de datos. Tu ÚNICA tarea es convertir el JSON en una lista legible.
-
-DATOS A FORMATEAR:
-${dataJson}
-
-${templateSection}
-
-REGLAS:
-- Usa ÚNICAMENTE los datos del JSON. Jamás inventes valores.
-- No expliques nada. No hagas preguntas. Solo la lista.
-- Numera los ítems (1. 2. 3. …).${moreHint}
-
-Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
-{"message": "<lista formateada aquí>"}`;
+function parseOutputTemplate(raw: string): { header: string; itemPattern: string } {
+  const match = raw.match(/([\s\S]*?)\{\{#each\}\}([\s\S]*?)\{\{\/each\}\}/);
+  if (match) {
+    return { header: match[1].trim(), itemPattern: match[2].trim() };
+  }
+  return { header: '', itemPattern: raw.trim() };
 }
 
-function buildMessagePrompt(dataJson: string, outputTemplate: string, moreHint: string): string {
-  const templateSection = outputTemplate
-    ? `PLANTILLA (usa el primer resultado, reemplaza \${campo} con su valor):
-"${outputTemplate}"`
-    : `Presenta la información del primer resultado de forma natural y concisa.`;
-
-  return `Eres un formateador de datos. Tu ÚNICA tarea es presentar esta información.
-
-DATOS:
-${dataJson}
-
-${templateSection}
-
-REGLAS:
-- Usa ÚNICAMENTE los datos del JSON. Jamás inventes valores.
-- No hagas preguntas adicionales.${moreHint}
-
-Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
-{"message": "<respuesta formateada aquí>"}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Fallback determinístico — cuando rawCall retorna null
-// ─────────────────────────────────────────────────────────────────────────────
-
-function buildDeterministicFallback(
+function buildDeterministicList(
   documents: Record<string, any>[],
   outputTemplate: string,
-  templateMode: 'message' | 'list',
 ): string {
   if (!documents.length) return 'No se encontraron resultados.';
 
-  if (outputTemplate) {
-    if (templateMode === 'message') return applyTemplate(outputTemplate, documents[0]);
-    return documents.map((doc, i) => `${i + 1}. ${applyTemplate(outputTemplate, doc)}`).join('\n');
+  if (!outputTemplate) {
+    return documents
+      .map((doc, i) => {
+        const d = doc.data ?? doc;
+        const fields = Object.entries(d)
+          .filter(([k]) => k !== '_id' && !k.startsWith('__'))
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(' — ');
+        return `${i + 1}. ${fields}`;
+      })
+      .join('\n');
   }
 
-  return documents
-    .map((doc, i) => {
-      const fields = Object.entries(doc)
-        .filter(([k]) => k !== '_id' && !k.startsWith('__'))
-        .map(([k, v]) => `   ${k}: ${v}`)
-        .join('\n');
-      return `${i + 1}.\n${fields}`;
-    })
-    .join('\n\n');
+  const { header, itemPattern } = parseOutputTemplate(outputTemplate);
+  const items = documents
+    .map((doc, i) => applyTemplate(itemPattern, doc, i + 1))
+    .join('\n');
+
+  return header ? `${header}\n${items}` : items;
 }
 
-function applyTemplate(template: string, doc: Record<string, any>): string {
-  const data = doc.data ?? doc;
-  return template.replace(/\$\{(\w+)\}/g, (_, key) => {
-    const val = data[key] ?? doc[key];
+function applyTemplate(
+  template: string,
+  doc: Record<string, any>,
+  index?: number,
+): string {
+  const d = doc.data ?? doc;
+
+  return template.replace(/\$\{([^}]+)\}/g, (_, key: string) => {
+    if (key === 'index' && index !== undefined) return String(index);
+
+    const dbMatch = key.match(/^db\.(\w+)\.(\w+)$/);
+    if (dbMatch) {
+      const namespacedKey = `${dbMatch[1]}.${dbMatch[2]}`;
+      const val = d[namespacedKey] ?? doc[namespacedKey];
+      return val !== undefined && val !== null ? String(val) : `[${key}]`;
+    }
+
+    const val = d[key] ?? doc[key];
     return val !== undefined && val !== null ? String(val) : `[${key}]`;
   });
 }
 
-// Interpolar variables ${form.X} en strings del outputNode
+function buildSingleDocFallback(doc: Record<string, any>): string {
+  const d = doc.data ?? doc;
+  return Object.entries(d)
+    .filter(([k]) => k !== '_id' && !k.startsWith('_'))
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+}
+
 function resolveTemplate(template: string, formState: FormState): string {
   return template.replace(/\$\{form\.(\w+)\}/g, (_, key) => {
     const value = formState[key];

@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// session/session.manager.ts  (v2 — multicanal)
+// session/session.manager.ts  (v3 — outputCache)
 // ─────────────────────────────────────────────────────────────────────────────
 import { Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,6 +8,7 @@ import {
   BotRuntimeConfig,
   ChannelType,
   FormState,
+  OutputCache,
 } from '../engine.types';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -66,11 +67,48 @@ export class SessionService {
     s.formState = { ...s.formState, ...partial };
   }
 
-  pushTurn(sessionId: string, userMsg: string, assistantMsg: string): void {
+  /**
+   * Acumula documentos crudos en el caché del outputNode indicado.
+   * El caché es acumulativo entre páginas — nunca se sobreescribe,
+   * solo se añade — para que el inputNode siempre tenga el universo completo.
+   */
+  appendOutputCache(sessionId: string, nodeId: string, docs: Record<string, any>[]): void {
+    const s = this.sessions.get(sessionId);
+    if (!s || !docs.length) return;
+    const existing = s.outputCache[nodeId] ?? [];
+    s.outputCache[nodeId] = [...existing, ...docs];
+    this.logger.log(
+      `[outputCache] sessionId="${sessionId}" nodeId="${nodeId}" ` +
+      `+${docs.length} docs → total=${s.outputCache[nodeId].length}`,
+    );
+  }
+
+  /**
+   * Devuelve el caché acumulado de un outputNode específico.
+   * Retorna array vacío si no hay caché para ese nodo.
+   */
+  getOutputCache(sessionId: string, nodeId: string): Record<string, any>[] {
+    const s = this.sessions.get(sessionId);
+    return s?.outputCache[nodeId] ?? [];
+  }
+
+  pushTurn(sessionId: string, userMsg: string, assistantMessages: string | string[]): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+
+    const msgs     = Array.isArray(assistantMessages) ? assistantMessages : [assistantMessages];
+    const nonEmpty = msgs.filter(m => m?.trim());
+
+    this.logger.log(
+      `[pushTurn] sessionId="${sessionId}"\n` +
+      `  user      : "${userMsg}"\n` +
+      `  assistant : ${JSON.stringify(nonEmpty)}`,
+    );
+
     s.history.push({ role: 'user', content: userMsg });
-    s.history.push({ role: 'assistant', content: assistantMsg });
+    if (nonEmpty.length > 0) {
+      s.history.push({ role: 'assistant', content: nonEmpty.join('\n\n') });
+    }
     s.turns += 1;
     this.touch(s);
   }
@@ -111,10 +149,18 @@ export class SessionService {
       p.config.formFields.map((f) => [f.name, null]),
     );
     const session: ChatSession = {
-      sessionId, visitorId: p.visitorId, channelId: p.channelId,
-      channel: p.channel, company_id: p.config.company_id,
-      config: p.config, history: [], formState,
-      currentNodeId: p.config.startNode, turns: 0, lastActivity: Date.now(),
+      sessionId,
+      visitorId:     p.visitorId,
+      channelId:     p.channelId,
+      channel:       p.channel,
+      company_id:    p.config.company_id,
+      config:        p.config,
+      history:       [],
+      formState,
+      outputCache:   {},   // ← inicializado vacío; outputNodes lo llenan en runtime
+      currentNodeId: p.config.startNode,
+      turns:         0,
+      lastActivity:  Date.now(),
     };
     this.sessions.set(sessionId, session);
     this.visitorIndex.set(this.buildKey(p.channelId, p.visitorId), sessionId);

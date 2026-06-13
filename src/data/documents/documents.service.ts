@@ -15,6 +15,8 @@ import { DtoService } from './dto/dto.service';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { IndexingService } from '../../indexing/indexing/indexing.service'
 import { QdrantService } from '../../qdrant/qdrant.service';
+import { AutoFieldType } from '../schemas/dto/create-schema.dto';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class DocumentsService {
@@ -68,11 +70,17 @@ export class DocumentsService {
     );
     const docOrm = new MongoOrmService<DocumentModel>(docModel);
 
+
+    const batchId   = uuidv4();
+   const timestamp = new Date().toISOString();
+   
     const created = await docOrm.transaction(async (ormScoped) => {
       const results: any[] = [];
       for (const data of documents) {
+           const resolvedData = this.resolveAutoFields(data, schema.fields, { batchId, timestamp });
+   
         const toCreate = {
-          data,
+           data: resolvedData, 
           company_id: companyId,
           schema_id: schemaId,
           category: schema.category,
@@ -129,8 +137,14 @@ export class DocumentsService {
     );
     const docOrm = new MongoOrmService<DocumentModel>(docModel);
 
+    const batchId   = uuidv4();
+    const timestamp = new Date().toISOString();
+
+    const resolvedData = this.resolveAutoFields(dto, schema.fields, { batchId, timestamp });
+
+
     const created = await docOrm.create({
-      data: dto,
+      data: resolvedData, 
       company_id: companyId,
       schema_id: schemaId,
       category: schema.category,
@@ -142,7 +156,7 @@ export class DocumentsService {
       schemaId,
       companyId,
       category:     schema.category,
-      documentData: dto,
+      documentData: resolvedData, 
       schemaFields: schema.fields,
     });
 
@@ -337,4 +351,31 @@ export class DocumentsService {
 
     return doc;
   }
+
+  // ── Helper: resuelve valores automáticos ──────────────────────────────────
+private resolveAutoFields(
+  data: Record<string, any>,
+  fields: SchemaModel['fields'],
+  context: { batchId: string; timestamp: string },
+): Record<string, any> {
+  const result = { ...data };
+
+  for (const field of fields) {
+    if (!field.auto) continue;
+
+    switch (field.auto) {
+      case AutoFieldType.UUID:
+        result[field.name] = uuidv4();
+        break;
+      case AutoFieldType.TIMESTAMP:
+        result[field.name] = context.timestamp;
+        break;
+      case AutoFieldType.BATCH_ID:
+        result[field.name] = context.batchId;
+        break;
+    }
+  }
+
+  return result;
+}
 }

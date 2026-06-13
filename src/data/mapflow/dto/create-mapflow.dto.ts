@@ -7,8 +7,10 @@ import {
   IsNumber,
   IsBoolean,
   IsObject,
+  IsNotEmpty,
+  ArrayMinSize,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   NodeType,
   ConversationNodeData,
@@ -25,6 +27,10 @@ import {
   GlobalCriteria,
   RouterCondition,
   Intent,
+  ApiNodeData,
+  BodyField,
+  InsertNodeData,
+  FieldMapping,
 } from '../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +65,9 @@ class SchemeObjectDto implements SchemeObject {
   @IsArray()
   @IsString({ each: true })
   selectedFields: string[];
+
+  @IsString()
+  schemaName: string;
 }
 
 class GlobalCriteriaDto implements GlobalCriteria {
@@ -97,30 +106,31 @@ class ConversationNodeDataDto implements ConversationNodeData {
 
   @IsString() message: string;
 
-  @IsOptional()
+ @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => FormFieldDto)
+  @Transform(({ value }) => value ?? undefined)  // null → undefined → @IsOptional lo ignora
   availableFormFields?: FormFieldDto[];
 }
 
 class InputNodeDataDto implements InputNodeData {
   @IsString() label: string;
   @IsString() fieldName: string;
-
+ 
   @IsEnum(['text', 'number', 'date', 'select'])
   fieldType: 'text' | 'number' | 'date' | 'select';
-
+ 
   @IsString() description: string;
-
+ 
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   options?: string[];
-
+ 
   @IsOptional() @IsBoolean() implicit?: boolean;
-
 }
+ 
 
 class FallbackNodeDataDto implements FallbackNodeData {
   @IsString() label: string;
@@ -143,6 +153,10 @@ class OutputNodeDataDto implements OutputNodeData {
   @IsOptional()
   @IsString()
   outputTemplate?: string;
+
+    @IsOptional()
+  @IsBoolean()
+   outputVisible?: boolean;
 
   @IsEnum(['message', 'list', 'raw'])
   templateMode: 'message' | 'list' | 'raw';
@@ -207,6 +221,7 @@ class RouterNodeDataDto implements RouterNodeData {
   @Type(() => RouterConditionDto)
   conditions: RouterConditionDto[];
 
+    @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => FormFieldDto)
@@ -224,11 +239,13 @@ class ConfirmationNodeDataDto implements ConfirmationNodeData {
   @IsString() positiveLabel: string;
   @IsString() negativeLabel: string;
 
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => SummaryFieldDto)
   summaryFields: SummaryFieldDto[];
 
+    @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => FormFieldDto)
@@ -240,6 +257,55 @@ class GoToNodeDataDto implements GoToNodeData {
   @IsString() targetNodeId: string;
   @IsString() targetNodeLabel: string;
   @IsString() reason: string;
+}
+
+
+export enum StorePermission {
+  INSERT = 'insert',
+  EDIT   = 'edit',
+  DELETE = 'delete',
+  SHOW   = 'show',
+}
+
+export class StoreNodeDto {
+  @IsString()
+  @IsNotEmpty()
+  nodeId: string;
+ 
+  @IsString()
+  @IsNotEmpty()
+  objectVar: string;
+ 
+
+  @IsString()
+  @IsNotEmpty()
+  extractFromNodeId: string;
+ 
+
+  @IsBoolean()
+  isArray: boolean;
+ 
+  @IsBoolean()
+  isGlobal: boolean;
+ 
+  @IsOptional()
+  @IsString()
+  closeNodeId?: string;
+ 
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsEnum(StorePermission, { each: true })
+  permissions: StorePermission[];
+ 
+
+  @IsBoolean()
+  feedbackVisible: boolean;
+ 
+  
+  @IsOptional()
+  @IsString()
+  feedbackMessage?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +332,8 @@ function resolveDataDto(nodeType: NodeType) {
     case 'routerNode':        return RouterNodeDataDto;
     case 'confirmationNode':  return ConfirmationNodeDataDto;
     case 'goToNode':          return GoToNodeDataDto;
+    case 'insertNode':        return InsertNodeDataDto;  // ← nuevo
+    case 'apiNode':           return ApiNodeDataDto;     // ← nuevo
     default:                  return ConversationNodeDataDto;
   }
 }
@@ -277,8 +345,8 @@ function resolveDataDto(nodeType: NodeType) {
 const NODE_TYPES: NodeType[] = [
   'conversationNode', 'intentNode', 'inputNode', 'outputNode',
   'fallbackNode', 'routerNode', 'confirmationNode', 'goToNode',
+  'insertNode', 'apiNode',   // ← nuevo
 ];
-
 class NodeDto {
   @IsString() id: string;
 
@@ -390,4 +458,57 @@ export class CreateMapflowDto {
   @ValidateNested({ each: true })
   @Type(() => MappedNode2Dto)
   map: MappedNode2Dto[];
+}
+
+
+// ── Nuevos DTOs de datos ──────────────────────────────────────────────────
+
+class FieldMappingDto implements FieldMapping {
+  @IsString() schemaField: string;
+
+  @IsNotEmpty()
+  @IsString() source: string;
+}
+
+class InsertNodeDataDto implements InsertNodeData {
+  @IsString() label: string;
+  @IsString() selectedSchemaId: string;
+  @IsString() schemaName: string;   
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => FieldMappingDto)
+  fieldMappings: FieldMappingDto[];
+
+  @IsOptional() @IsBoolean() outputEnabled?: boolean;  // ← nuevo
+  @IsOptional() @IsString()  outputTemplate?: string;  // ← nuevo
+
+    // ← campos UI que el frontend manda pero el engine no usa
+  @IsOptional() @IsArray() availableSchemas?: any[];
+  @IsOptional() @IsArray() availableFormFields?: any[];
+  @IsOptional() @IsArray() availableFormObjects?: any[];
+}
+
+class BodyFieldDto implements BodyField {
+  @IsString() id: string;
+  @IsString() fieldName: string;
+
+  @IsEnum(["string", "number", "boolean", "date"])
+  fieldType: "string" | "number" | "boolean" | "date";
+
+  @IsString() source: string;
+}
+
+class ApiNodeDataDto implements ApiNodeData {
+  @IsString() label: string;
+  @IsString() url: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => BodyFieldDto)
+  bodyFields: BodyFieldDto[];
+
+  @IsOptional()
+  @IsString()
+  responseVar?: string;
 }

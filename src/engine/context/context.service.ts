@@ -138,37 +138,39 @@ REGLAS CRÍTICAS:
 5. Cuando el intent es reconocido, "message" debe ir vacío — el siguiente nodo responde al usuario`;
       },
 
-   inputNode: (data) => data.implicit
+inputNode: (data) => data.implicit
 
   ? `## Tarea: Capturar "${data.fieldName}" de forma implícita
 
-Antes de preguntar, revisa el historial de conversación en busca de un valor para "${data.fieldName}" (${data.fieldType}).
+        Revisa el mensaje actual del usuario en busca de un valor para "${data.fieldName}" (${data.fieldType}).
+        ${data.description ? `- Contexto: ${data.description}` : ''}
 
-- Si el usuario ya lo mencionó → colócalo en "data.${data.fieldName}", message:"", done:true
-- Si no hay indicio claro → pregunta explícitamente: "${data.description}", done:false
+        REGLAS ESTRICTAS:
+        - Si el mensaje contiene un valor claro para "${data.fieldName}" → colócalo en "data.${data.fieldName}", message: "", done: true INMEDIATAMENTE.
+        - done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
+        - NUNCA hagas preguntas cuando encontraste el valor.
+        - Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
+        CRÍTICO: Si encontraste el valor, done DEBE ser true y message DEBE ser "". No confirmes, no preguntes, no respondas — solo captura y avanza.`
 
-Nunca inventes el valor.`
+          : `## Tarea actual: Capturar dato
+        Tu ÚNICA responsabilidad es capturar el campo "${data.fieldName ?? 'dato'}" de tipo ${data.fieldType ?? 'texto'}.
+        ${data.description ? `- Contexto: ${data.description}` : ''}
 
-  : `## Tarea actual: Capturar dato
-Necesitas obtener del usuario:
-- Campo: "${data.fieldName ?? 'dato'}"
-- Tipo: ${data.fieldType ?? 'texto'}
-${data.description ? `- Descripción: ${data.description}` : ''}
-Haz UNA sola pregunta para obtener este dato.
-Cuando el usuario responda con un valor válido, colócalo en "data.${data.fieldName}" y devuelve done: true.
-Si la respuesta no es válida para el tipo esperado, pide que lo reformule sin avanzar (done: false).
+        REGLAS ESTRICTAS:
+      - Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
+      - Cuando el usuario proporcione un valor válido para "${data.fieldName}" → colócalo en "data.${data.fieldName}" y devuelve done: true INMEDIATAMENTE.
+        - done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
+        - Si la respuesta no es válida para ${data.fieldType ?? 'texto'}, pide reformular (done: false).
 
-RESTRICCIÓN CRÍTICA: Tu único rol es capturar el dato "${data.fieldName ?? 'dato'}".
-NUNCA respondas preguntas, NUNCA confirmes ni niegues información sobre productos,
-precios, stock ni nada externo — aunque el usuario lo pregunte o lo mencione en el
-historial. Si el usuario condiciona su respuesta o hace preguntas, ignóralas por
-completo y repite únicamente la pregunta para obtener el dato requerido.`,
-      outputNode: (data) =>
-        `## Tarea actual: Presentar información
-${data.resolvedContent
-  ? `Información disponible para mostrar:\n${JSON.stringify(data.resolvedContent, null, 2)}`
-  : 'No se encontró información para mostrar.'}
-Presenta la información de forma clara. No inventes datos. Devuelve done: true.`,
+        RESTRICCIÓN CRÍTICA: Tu único rol es capturar "${data.fieldName ?? 'dato'}".
+        NUNCA respondas preguntas, NUNCA confirmes ni niegues información sobre productos,
+        precios, stock ni nada externo. NUNCA esperes datos adicionales de otros campos.`,
+              outputNode: (data) =>
+                `## Tarea actual: Presentar información
+        ${data.resolvedContent
+          ? `Información disponible para mostrar:\n${JSON.stringify(data.resolvedContent, null, 2)}`
+          : 'No se encontró información para mostrar.'}
+        Presenta la información de forma clara. No inventes datos. Devuelve done: true.`,
 
       routerNode: (data) =>
         `## Tarea actual: Enrutar
@@ -176,13 +178,23 @@ Analiza el mensaje y determina la ruta correcta.
 Condiciones: ${JSON.stringify(data.conditions ?? [])}
 Devuelve tu decisión en "intent". No respondas preguntas — solo enruta.`,
 
-      confirmationNode: (data) =>
-        `## Tarea actual: Confirmar acción
+confirmationNode: (data) => {
+  const branchKeys = Object.keys(data.branches ?? {});
+  const yesKey = branchKeys.find(k =>
+    ['yes','si','sí','confirmed','true','confirm','positive'].includes(k.toLowerCase())
+  ) ?? branchKeys[0] ?? 'yes';
+  const noKey = branchKeys.find(k =>
+    ['no','rejected','false','cancel','reject','negative'].includes(k.toLowerCase())
+  ) ?? branchKeys[1] ?? 'no';
+
+  return `## Tarea actual: Confirmar acción
 ${data.confirmationMessage ? `Mensaje de confirmación: "${data.confirmationMessage}"` : 'Pide confirmación al usuario.'}
 ${data.summaryFields?.length ? `Muestra el resumen: ${JSON.stringify(data.summaryFields)}` : ''}
-Si el usuario confirma → intent: "confirmed", done: true.
-Si el usuario rechaza → intent: "rejected", done: true.
-Si no queda claro → done: false y vuelve a preguntar.`,
+Infiere la intención del usuario con lenguaje natural — acepta cualquier expresión afirmativa o negativa.
+Si el usuario confirma → intent: "${yesKey}", done: true.
+Si el usuario rechaza  → intent: "${noKey}",  done: true.
+Si no queda claro      → intent: "",           done: false y vuelve a preguntar.`;
+},
 
       fallbackNode: (data) =>
         `## Tarea actual: Fallback

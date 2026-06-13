@@ -12,7 +12,10 @@ export type NodeType =
   | "fallbackNode"
   | "routerNode"
   | "confirmationNode"
-  | "goToNode";
+  | "goToNode"
+  | "insertNode"  // ← nuevo
+  | "apiNode"    // ← nuevo
+  | "storeNode"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Primitivos compartidos
@@ -52,9 +55,7 @@ export interface InputNodeData {
   description: string;
   options?: string[];
   implicit?: boolean;
-  
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // FallbackNodeData
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ export interface SchemeObject {
   id: string;
   selectedSchema: string;
   selectedFields: string[];
+  schemaName: string; // ← nuevo: nombre visual del schema (ej: "inventario_farmaceutico")
 }
 
 export interface GlobalCriteria {
@@ -89,6 +91,7 @@ export interface OutputNodeData {
   schemes: SchemeObject[];
   globalCriteria: GlobalCriteria[];
   outputTemplate?: string;
+  outputVisible?: boolean;
   templateMode: TemplateMode;
   emptyFallbackEnabled?: boolean;
   emptyFallbackMessage?: string;
@@ -115,6 +118,28 @@ export interface IntentNodeData {
   maxRetries: number;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// StoreNode
+// ─────────────────────────────────────────────────────────────────────────────
+
+export enum StorePermission {
+  INSERT = "insert",
+  EDIT = "edit",
+  DELETE = "delete",
+  SHOW = "show",
+}
+
+export interface StoreNodeData {
+  nodeId: string;
+  objectVar: string;
+  extractFromNodeId: string;
+  isArray: boolean;
+  isGlobal: boolean;
+  closeNodeId?: string;
+  permissions: StorePermission[];
+  feedbackVisible: boolean;
+  feedbackMessage?: string;
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // RouterNodeData
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,6 +182,42 @@ export interface GoToNodeData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// InsertNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FieldMapping {
+  schemaField: string;
+  source: string; // "form:x" | "obj:varName.attr" | "auto:now" | "auto:order" | ""
+}
+
+export interface InsertNodeData {
+  label: string;
+  selectedSchemaId: string;
+  schemaName: string;   
+  fieldMappings: FieldMapping[];
+  outputEnabled?: boolean;   // ← nuevo
+  outputTemplate?: string;   // ← nuevo
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ApiNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BodyField {
+  id: string;         // solo UI, no lo usa el engine
+  fieldName: string;
+  fieldType: "string" | "number" | "boolean" | "date";
+  source: string;     // mismo patrón que FieldMapping.source + "static:valor"
+}
+
+export interface ApiNodeData {
+  label: string;
+  url: string;
+  bodyFields: BodyField[];
+  responseVar?: string; // variable donde guardar el objeto retornado (opcional)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NodeData — union discriminada de todos los tipos
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -168,7 +229,10 @@ export type NodeData =
   | IntentNodeData
   | RouterNodeData
   | ConfirmationNodeData
-  | GoToNodeData;
+  | GoToNodeData
+  | InsertNodeData   // ← nuevo
+  | ApiNodeData    // ← nuevo
+  | StoreNodeData;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MappedNode2 — árbol serializado que va al backend / LLM

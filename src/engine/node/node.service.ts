@@ -5,7 +5,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { LLMMessage, RuntimeNode, ChatSession, FormState } from '../engine.types';
 import { ChatGroqService } from '../groq/chatGroq.service';
 import { DataResolverService } from './output/dataResolver.service';
+import { SessionService } from '../session/session.service';
 import { runOutputNode } from './output/output.handler';
+import { runInsertNode } from './insert/insert.handler';
+import { runApiNode } from './api/api.handler';
+import { PersistenceService } from '../../common/services/percistence/persistence.service';
+import { DocumentsService } from '../../data/documents/documents.service';
 
 export interface NodeResult {
   message: string;
@@ -29,10 +34,26 @@ export class NodeService {
   constructor(
     private readonly groq: ChatGroqService,
     private readonly dataResolver: DataResolverService,
+    private readonly sessionService: SessionService,
+    private readonly documents: DocumentsService,
+    private readonly persistence: PersistenceService,
   ) {}
 
   async run(ctx: RunnerContext): Promise<NodeResult> {
     this.logger.debug(`Ejecutando nodo id="${ctx.node.id}" type="${ctx.node.type}"`);
+    const result = await this.dispatch(ctx);
+    this.logger.log(
+      `[${ctx.node.type}] id="${ctx.node.id}" RESULT\n` +
+      `  message    : "${result.message}"\n` +
+      `  done       : ${result.done}\n` +
+      `  nextNodeId : "${result.nextNodeId ?? 'none'}"\n` +
+      `  intent     : "${result.intent ?? 'none'}"\n` +
+      `  data       : ${JSON.stringify(result.data)}`,
+    );
+    return result;
+  }
+
+  private async dispatch(ctx: RunnerContext): Promise<NodeResult> {
     switch (ctx.node.type) {
       case 'conversationNode': return this.runConversation(ctx);
       case 'intentNode':       return this.runIntent(ctx);
@@ -42,6 +63,8 @@ export class NodeService {
       case 'confirmationNode': return this.runConfirmation(ctx);
       case 'fallbackNode':     return this.runFallback(ctx);
       case 'goToNode':         return this.runGoTo(ctx);
+      case 'insertNode':       return this.runInsert(ctx);
+      case 'apiNode':          return this.runApi(ctx);
       default:
         this.logger.warn(`Nodo desconocido "${ctx.node.type}" — fallback`);
         return this.runFallback(ctx);
@@ -83,7 +106,6 @@ export class NodeService {
     const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
     const intent = llmResponse.intent?.trim();
 
-    // LOG DETALLADO — ver exactamente qué devuelve el LLM
     this.logger.log(
       `[intentNode] id="${ctx.node.id}"\n` +
       `  userMessage : "${ctx.userMessage}"\n` +
@@ -94,12 +116,13 @@ export class NodeService {
       `  match       : ${intent && ctx.node.branches?.[intent] ? `YES → "${ctx.node.branches[intent]}"` : 'NO'}`,
     );
 
-    // Intent válido → avanzar
+    const filteredData = this.filterFormData(llmResponse.data, ctx.session);
+
     if (intent && ctx.node.branches?.[intent]) {
       this.clearRetries(ctx.session, ctx.node.id);
       return {
         message:    llmResponse.message,
-        data:       llmResponse.data,
+        data:       filteredData,
         done:       true,
         nextNodeId: ctx.node.branches[intent],
         intent,
@@ -117,7 +140,7 @@ export class NodeService {
     if (retries < maxRetries) {
       return {
         message:    llmResponse.message,
-        data:       llmResponse.data,
+        data:       filteredData,
         done:       false,
         nextNodeId: undefined,
         intent:     undefined,
@@ -166,36 +189,29 @@ export class NodeService {
 
   // ── inputNode ──────────────────────────────────────────────────────────────
 
-private async runInput(ctx: RunnerContext): Promise<NodeResult> {
-  const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
+  private async runInput(ctx: RunnerContext): Promise<NodeResult> {
+    const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
 
-  this.logger.log(
-    `[inputNode] id="${ctx.node.id}" implicit=${ctx.node.data?.implicit}\n` +
-    `  userMessage : "${ctx.userMessage}"\n` +
-    `  llm.message : "${llmResponse.message}"\n` +
-    `  llm.data    : ${JSON.stringify(llmResponse.data)}\n` +
-    `  llm.done    : ${llmResponse.done}`,
-  );
+    this.logger.log(
+      `[inputNode] id="${ctx.node.id}" implicit=${ctx.node.data?.implicit}\n` +
+      `  userMessage : "${ctx.userMessage}"\n` +
+      `  llm.message : "${llmResponse.message}"\n` +
+      `  llm.data    : ${JSON.stringify(llmResponse.data)}\n` +
+      `  llm.done    : ${llmResponse.done}`,
+    );
 
-  // Si el nodo es implicit y ya encontró el valor (done=true),
-  // forzar message:"" — su rol es solo extraer, no responder.
-  // El outputNode siguiente es quien le habla al usuario.
-  const message = (ctx.node.data?.implicit && llmResponse.done)
-    ? ''
-    : llmResponse.message;
-
-  return {
-    message,
-    data:       llmResponse.data,
-    done:       llmResponse.done,
-    nextNodeId: llmResponse.done ? ctx.node.next?.[0] : undefined,
-  };
-}
+    return {
+      message:    llmResponse.done ? '' : llmResponse.message, 
+      data:       llmResponse.data,
+      done:       llmResponse.done,
+      nextNodeId: llmResponse.done ? ctx.node.next?.[0] : undefined,
+    };
+  }
 
   // ── outputNode ─────────────────────────────────────────────────────────────
 
   private async runOutput(ctx: RunnerContext): Promise<NodeResult> {
-    return runOutputNode(ctx, this.groq, this.dataResolver);
+    return runOutputNode(ctx, this.groq, this.dataResolver, this.sessionService);
   }
 
   // ── routerNode ─────────────────────────────────────────────────────────────
@@ -219,13 +235,50 @@ private async runInput(ctx: RunnerContext): Promise<NodeResult> {
 
   private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
     const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
-    const intent = llmResponse.intent?.trim().toLowerCase() ?? 'rejected';
-    const nextNodeId = ctx.node.branches?.[intent] ?? ctx.node.next?.[0];
+    const rawIntent   = llmResponse.intent?.trim() ?? '';
+
+    this.logger.log(
+      `[confirmationNode] id="${ctx.node.id}"\n` +
+      `  userMessage : "${ctx.userMessage}"\n` +
+      `  llm.message : "${llmResponse.message}"\n` +
+      `  llm.intent  : "${rawIntent}"\n` +
+      `  llm.done    : ${llmResponse.done}\n` +
+      `  branches    : ${JSON.stringify(Object.keys(ctx.node.branches ?? {}))}\n` +
+      `  match       : ${ctx.node.branches?.[rawIntent] ? `YES → "${ctx.node.branches[rawIntent]}"` : 'NO'}`,
+    );
+
+    let intent = rawIntent;
+
+    if (!ctx.node.branches?.[intent]) {
+      const lower = rawIntent.toLowerCase();
+      const POSITIVE = ['yes', 'confirmed', 'si', 'sí', 'true', 'confirm', 'affirmative'];
+      const NEGATIVE  = ['no', 'rejected', 'cancel', 'false', 'reject', 'negative'];
+      const branchKeys = Object.keys(ctx.node.branches ?? {});
+
+      if (POSITIVE.includes(lower)) {
+        intent = branchKeys.find(k => POSITIVE.includes(k.toLowerCase())) ?? '';
+      } else if (NEGATIVE.includes(lower)) {
+        intent = branchKeys.find(k => NEGATIVE.includes(k.toLowerCase())) ?? '';
+      } else {
+        intent = '';
+      }
+
+      if (intent) {
+        this.logger.warn(
+          `[confirmationNode] intent "${rawIntent}" no era branch válida — mapeado a "${intent}"`,
+        );
+      }
+    }
+
+    const nextNodeId = intent
+      ? ctx.node.branches?.[intent] ?? ctx.node.next?.[0]
+      : undefined;
+
     return {
-      message:    llmResponse.message,
+      message:    intent ? '' : llmResponse.message,
       data:       llmResponse.data,
-      done:       llmResponse.done,
-      nextNodeId: llmResponse.done ? nextNodeId : undefined,
+      done:       intent !== '',
+      nextNodeId,
       intent,
     };
   }
@@ -250,6 +303,18 @@ private async runInput(ctx: RunnerContext): Promise<NodeResult> {
     };
   }
 
+  // ── insertNode ─────────────────────────────────────────────────────────────
+
+  private async runInsert(ctx: RunnerContext): Promise<NodeResult> {
+    return runInsertNode(ctx, this.documents, this.persistence);
+  }
+
+  // ── apiNode ────────────────────────────────────────────────────────────────
+
+  private async runApi(ctx: RunnerContext): Promise<NodeResult> {
+    return runApiNode(ctx);
+  }
+
   // ── goToNode ───────────────────────────────────────────────────────────────
 
   private async runGoTo(ctx: RunnerContext): Promise<NodeResult> {
@@ -261,6 +326,13 @@ private async runInput(ctx: RunnerContext): Promise<NodeResult> {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+
+  private filterFormData(data: FormState, session: ChatSession): FormState {
+    const validFields = new Set(session.config.formFields.map(f => f.name));
+    return Object.fromEntries(
+      Object.entries(data).filter(([k]) => validFields.has(k) || k.startsWith('__')),
+    );
+  }
 
   private resolveTemplate(template: string, formState: FormState): string {
     return template.replace(/\$\{form\.(\w+)\}/g, (_, key) => {

@@ -8,6 +8,14 @@ export enum FieldType {
   JSON = 'json',
   DATE = 'date',
 }
+
+export enum AutoFieldType {
+  UUID       = 'uuid',
+  TIMESTAMP  = 'timestamp',
+  BATCH_ID   = 'batch_id',
+}
+
+
 export enum SchemaCategory {
   INVENTORY = 'inventory',
   SCHEDULE = 'schedule',
@@ -27,6 +35,13 @@ export class CreateSchemaFieldDto {
   @IsOptional()
   @IsBoolean()
   unique?: boolean;
+
+
+  @IsOptional()
+   @IsEnum(AutoFieldType, {
+    message: 'auto debe ser "uuid", "timestamp" o "batch_id"',
+  })
+  auto?: AutoFieldType; // 'uuid' | 'timestamp' | 'batch_id' | undefined
 }
 
 export class CreateSchemaDto {

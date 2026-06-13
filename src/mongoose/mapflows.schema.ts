@@ -12,6 +12,8 @@ const NODE_TYPES = [
   'routerNode',
   'confirmationNode',
   'goToNode',
+  'insertNode',   // ← nuevo
+  'apiNode',      // ← nuevo
 ] as const;
 
 const EDGE_TYPES = ['default', 'fallback', 'jump'] as const;

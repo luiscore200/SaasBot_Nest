@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// chat-engine.types.ts  (v2 — multicanal)
+// chat-engine.types.ts  (v5 — outputCache en sesión)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type LLMRole = 'system' | 'user' | 'assistant';
@@ -11,13 +11,6 @@ export interface LLMMessage {
 
 // ── Canal de entrada ──────────────────────────────────────────────────────────
 
-/**
- * El engine es agnóstico al canal.
- * Cada adapter externo resuelve botConfigId + visitorId antes de llamar al engine.
- *
- * widget    → visitorId = UUID localStorage del browser
- * whatsapp  → visitorId = número de teléfono del usuario (+57300...)
- */
 export type ChannelType = 'widget' | 'whatsapp';
 
 // ── Formulario del mapflow ────────────────────────────────────────────────────
@@ -29,16 +22,52 @@ export interface FormFieldDef {
   required?: boolean;
 }
 
-export type FormState = Record<string, string | number | boolean | null>;
+export type FormState = Record<string, string | number | boolean | null | Record<string, number>>;
+
+// ── Paginación múltiple ───────────────────────────────────────────────────────
+
+/**
+ * Entrada de paginación por nodo.
+ * El frontend mantiene este mapa y, al presionar "ver más",
+ * envía el nodeId correspondiente para reactivar ese outputNode específico.
+ */
+export interface PaginationEntry {
+  nodeId: string;
+  hasMore: boolean;
+  currentPage: number;
+}
+
+// ── Mensaje tipado ────────────────────────────────────────────────────────────
+
+/**
+ * Mensaje individual dentro de un turno.
+ * El campo pagination solo está presente en el mensaje del outputNode
+ * que tiene más páginas — el frontend usa esto para saber exactamente
+ * en qué burbuja renderizar el botón "ver más".
+ */
+export interface ChatMessage {
+  text: string;
+  pagination?: PaginationEntry;
+}
+
+// ── Caché de documentos por outputNode ───────────────────────────────────────
+
+/**
+ * Caché acumulativo de documentos crudos resueltos por cada outputNode en modo list.
+ * Vive en la sesión (no en formState) para no contaminar el contexto del LLM
+ * ni el formulario que se expone al usuario.
+ *
+ * Clave: nodeId del outputNode.
+ * Valor: array acumulativo de documentos (sin formatear, sin template).
+ *
+ * Se acumula página a página para que el inputNode con extractFromNodeId
+ * tenga siempre el universo completo de items mostrados hasta ese momento.
+ */
+export type OutputCache = Record<string, Record<string, any>[]>;
 
 // ── Configuración del bot en runtime ─────────────────────────────────────────
 
-/**
- * Snapshot inmutable cargado UNA VEZ por sesión desde Mongo.
- * Los runtimeNodes se guardan aquí para acceso O(1) sin queries adicionales.
- */
 export interface BotRuntimeConfig {
-  // — ChatbotModel —
   botConfigId: string;
   company_id: string;
   name: string;
@@ -47,12 +76,8 @@ export interface BotRuntimeConfig {
   type: string;
   maxTurns: number;
   selectedSchemas: string[];
-
-  // — MapflowModel —
   mapflowId: string;
   formFields: FormFieldDef[];
-
-  // — FlowRuntime —
   startNode: string;
   runtimeNodes: Record<string, RuntimeNode>;
 }
@@ -61,14 +86,19 @@ export interface BotRuntimeConfig {
 
 export interface ChatSession {
   sessionId: string;
-  visitorId: string;      // UUID browser (widget) | número teléfono (whatsapp)
-  channelId: string;      // botConfigId (widget)  | phoneNumberId (whatsapp)
+  visitorId: string;
+  channelId: string;
   channel: ChannelType;
   company_id: string;
-
   config: BotRuntimeConfig;
   history: LLMMessage[];
   formState: FormState;
+  /**
+   * Caché de documentos crudos por outputNode.
+   * Solo outputNodes en modo list escriben aquí.
+   * Los inputNodes con extractFromNodeId leen de aquí.
+   */
+  outputCache: OutputCache;
   currentNodeId: string;
   turns: number;
   lastActivity: number;
@@ -84,15 +114,17 @@ export type NodeType =
   | 'fallbackNode'
   | 'routerNode'
   | 'confirmationNode'
-  | 'goToNode';
+  | 'goToNode'
+  | 'insertNode'   // ← nuevo
+  | 'apiNode'; 
 
 export interface RuntimeNode {
   id: string;
   type: NodeType;
   data: Record<string, any>;
-  next: string[];                     // sucesor(es) lineales
-  branches?: Record<string, string>;  // branch-key → nodeId (intent/router/confirmation/output)
-  fallback?: string;                  // nodeId fallback (intentNode con maxRetries)
+  next: string[];
+  branches?: Record<string, string>;
+  fallback?: string;
 }
 
 // ── Respuesta estructurada del LLM ────────────────────────────────────────────
@@ -110,10 +142,16 @@ export interface ChatRequest {
   message: string;
   sessionId?: string;
   visitorId: string;
+  /**
+   * Presente cuando el frontend activa "ver más" para un outputNode específico.
+   * El engine intercepta esto antes del chain normal y redirige al nodo correcto.
+   */
+  paginateNodeId?: string;
 }
 
 export interface ChatResponse {
-  message: string;
+  message: string;          // último mensaje (compatibilidad con canales simples)
+  messages: ChatMessage[];  // array tipado — cada burbuja puede llevar su paginación
   sessionId: string;
   currentNode: string;
   formState: FormState;

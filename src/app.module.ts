@@ -26,6 +26,7 @@ import { IndexingModule } from './indexing/indexing.module';
 import { QdrantModule } from './qdrant/qdrant.module';
 import { EngineModule } from './engine/engine.module';
 import { OllamaModule } from './ollama/ollama.module';
+import { GeminiModule } from './gemini/gemini.module';
 
 
 
@@ -78,6 +79,10 @@ import { OllamaModule } from './ollama/ollama.module';
     
 
      OllamaModule,
+
+    
+
+     GeminiModule,
 
     
 
