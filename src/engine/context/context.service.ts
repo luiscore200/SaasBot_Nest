@@ -9,10 +9,36 @@ export class ContextService {
   build(session: ChatSession, node: RuntimeNode): LLMMessage[] {
     return [
       { role: 'system', content: this.buildSystemPrompt(session, node) },
-      ...session.history,
+      ...this.buildHistory(session, node),
     ];
   }
 
+  // ── Historial — reencuadra mensajes interceptados para intentNode ──────────
+
+  /**
+   * El intentNode necesita un historial limpio: los mensajes que ya fueron
+   * manejados por un storeNode global se neutralizan para que no contaminen
+   * la clasificación de intención.
+   *
+   * El bot general (conversationNode, etc.) sigue viendo el contenido original,
+   * preservando la coherencia conversacional.
+   */
+ private buildHistory(session: ChatSession, node: RuntimeNode): LLMMessage[] {
+  const CLASSIFY_NODES = ['intentNode', 'confirmationNode'];
+
+  const history = CLASSIFY_NODES.includes(node.type)
+    ? session.history.map((msg) => {
+        if (!msg.interceptedBy) return msg;
+        return {
+          role:    msg.role,
+          content: '[acción de tienda resuelta por el sistema, ignorar para clasificación]',
+        };
+      })
+    : session.history;
+
+  // ── Limpiar propiedades custom que Groq no acepta ─────────────────
+  return history.map(({ role, content }) => ({ role, content }));
+}
   private buildSystemPrompt(session: ChatSession, node: RuntimeNode): string {
     const { config, formState } = session;
     return [
@@ -46,42 +72,22 @@ Tu propósito es: ${description}
   ): string {
     if (!fields?.length) return '';
 
-    // Para conversationNode: respetar availableFormFields.
-    //
-    // - null  → solo campos con valor ya resuelto (no-nulo). El nodo no declaró
-    //           qué campos necesita, así que se le ocultan los pendientes para
-    //           evitar que el LLM "adivine" datos que aún no han sido verificados
-    //           contra la base de datos (el caso clásico: conversationNode saluda
-    //           antes del outputNode y ya "sabe" que hay aspirina disponible).
-    //
-    // - []    → no recibe ningún campo del formulario.
-    //
-    // - [...] → recibe exactamente esos campos, tengan valor o no.
-    //           Úsalo cuando el conversationNode necesita personalizar su mensaje
-    //           con un campo específico (ej: ["nombre"] para saludar al usuario).
-    //
-    // Para cualquier otro tipo de nodo: comportamiento original — todos los campos.
-
     const isConversation = node.type === 'conversationNode';
-    const allowedFields = isConversation
+    const allowedFields  = isConversation
       ? (node.data?.availableFormFields as string[] | null) ?? null
-      : null; // null sin isConversation = sin restricción
+      : null;
 
     const lines = fields
       .filter(f => !f.name.startsWith('__'))
       .filter(f => {
-        if (!isConversation) return true;             // otros nodos: sin filtro
-
-        if (allowedFields !== null)                   // lista explícita del operador
-          return allowedFields.includes(f.name);
-
-        // availableFormFields=null → solo exponer campos ya resueltos
+        if (!isConversation) return true;
+        if (allowedFields !== null) return allowedFields.includes(f.name);
         const v = formState[f.name];
         return v !== null && v !== undefined;
       })
       .map((field) => {
-        const value = formState[field.name];
-        const label = field.label ?? field.name;
+        const value    = formState[field.name];
+        const label    = field.label ?? field.name;
         const valueStr = value !== null && value !== undefined ? `"${value}"` : '[pendiente]';
         return `- ${label} (${field.type}): ${valueStr}`;
       });
@@ -98,19 +104,19 @@ ${lines.join('\n')}`;
     const builders: Record<string, (data: Record<string, any>) => string> = {
 
       conversationNode: (data) => {
-            const guide = data.message?.trim();
-            return `## Tarea actual: Conversación
-            ${guide ? `Objetivo: "${guide}"` : 'Mantén una conversación natural.'}
-            Si el usuario menciona datos del formulario, captúralos en "data".
-            Responde al usuario de forma natural. Devuelve siempre done: true.
+        const guide = data.message?.trim();
+        return `## Tarea actual: Conversación
+${guide ? `Objetivo: "${guide}"` : 'Mantén una conversación natural.'}
+Si el usuario menciona datos del formulario, captúralos en "data".
+Responde al usuario de forma natural. Devuelve siempre done: true.
 
-            RESTRICCIÓN CRÍTICA: Tu único rol es guiar la conversación hacia el siguiente paso del flujo.
-            NUNCA afirmes, confirmes ni niegues disponibilidad de productos, precios, stock,
-            ni ningún dato que provenga de una base de datos — aunque el usuario lo mencione
-            y aunque lo encuentres en el historial. Si el usuario pregunta algo así, responde
-            únicamente con una frase de transición neutral hacia el siguiente paso.
-            Ejemplo correcto: "Déjame verificar eso por ti." — no: "Sí, tenemos el producto."`;
-            },
+RESTRICCIÓN CRÍTICA: Tu único rol es guiar la conversación hacia el siguiente paso del flujo.
+NUNCA afirmes, confirmes ni niegues disponibilidad de productos, precios, stock,
+ni ningún dato que provenga de una base de datos — aunque el usuario lo mencione
+y aunque lo encuentres en el historial. Si el usuario pregunta algo así, responde
+únicamente con una frase de transición neutral hacia el siguiente paso.
+Ejemplo correcto: "Déjame verificar eso por ti." — no: "Sí, tenemos el producto."`;
+      },
 
       intentNode: (data) => {
         const intents = (data.intents ?? []) as Array<{
@@ -138,39 +144,40 @@ REGLAS CRÍTICAS:
 5. Cuando el intent es reconocido, "message" debe ir vacío — el siguiente nodo responde al usuario`;
       },
 
-inputNode: (data) => data.implicit
+      inputNode: (data) => data.implicit
 
-  ? `## Tarea: Capturar "${data.fieldName}" de forma implícita
+        ? `## Tarea: Capturar "${data.fieldName}" de forma implícita
 
-        Revisa el mensaje actual del usuario en busca de un valor para "${data.fieldName}" (${data.fieldType}).
-        ${data.description ? `- Contexto: ${data.description}` : ''}
+Revisa el mensaje actual del usuario en busca de un valor para "${data.fieldName}" (${data.fieldType}).
+${data.description ? `- Contexto: ${data.description}` : ''}
 
-        REGLAS ESTRICTAS:
-        - Si el mensaje contiene un valor claro para "${data.fieldName}" → colócalo en "data.${data.fieldName}", message: "", done: true INMEDIATAMENTE.
-        - done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
-        - NUNCA hagas preguntas cuando encontraste el valor.
-        - Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
-        CRÍTICO: Si encontraste el valor, done DEBE ser true y message DEBE ser "". No confirmes, no preguntes, no respondas — solo captura y avanza.`
+REGLAS ESTRICTAS:
+- Si el mensaje contiene un valor claro para "${data.fieldName}" → colócalo en "data.${data.fieldName}", message: "", done: true INMEDIATAMENTE.
+- done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
+- NUNCA hagas preguntas cuando encontraste el valor.
+- Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
+CRÍTICO: Si encontraste el valor, done DEBE ser true y message DEBE ser "". No confirmes, no preguntes, no respondas — solo captura y avanza.`
 
-          : `## Tarea actual: Capturar dato
-        Tu ÚNICA responsabilidad es capturar el campo "${data.fieldName ?? 'dato'}" de tipo ${data.fieldType ?? 'texto'}.
-        ${data.description ? `- Contexto: ${data.description}` : ''}
+        : `## Tarea actual: Capturar dato
+Tu ÚNICA responsabilidad es capturar el campo "${data.fieldName ?? 'dato'}" de tipo ${data.fieldType ?? 'texto'}.
+${data.description ? `- Contexto: ${data.description}` : ''}
 
-        REGLAS ESTRICTAS:
-      - Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
-      - Cuando el usuario proporcione un valor válido para "${data.fieldName}" → colócalo en "data.${data.fieldName}" y devuelve done: true INMEDIATAMENTE.
-        - done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
-        - Si la respuesta no es válida para ${data.fieldType ?? 'texto'}, pide reformular (done: false).
+REGLAS ESTRICTAS:
+- Si el mensaje NO contiene ningún valor claro → formula UNA pregunta natural y concisa para obtener "${data.fieldName}" usando el contexto disponible. Si el historial muestra que ya preguntaste antes por este dato, mantén el mismo tono amable pero varía ligeramente el fraseo — nunca repitas la misma frase exacta ni te pongas brusco.
+- Cuando el usuario proporcione un valor válido para "${data.fieldName}" → colócalo en "data.${data.fieldName}" y devuelve done: true INMEDIATAMENTE.
+- done: true se activa en cuanto tienes "${data.fieldName}" — NO esperes otros datos aunque el historial sugiera que faltan.
+- Si la respuesta no es válida para ${data.fieldType ?? 'texto'}, pide reformular (done: false).
 
-        RESTRICCIÓN CRÍTICA: Tu único rol es capturar "${data.fieldName ?? 'dato'}".
-        NUNCA respondas preguntas, NUNCA confirmes ni niegues información sobre productos,
-        precios, stock ni nada externo. NUNCA esperes datos adicionales de otros campos.`,
-              outputNode: (data) =>
-                `## Tarea actual: Presentar información
-        ${data.resolvedContent
-          ? `Información disponible para mostrar:\n${JSON.stringify(data.resolvedContent, null, 2)}`
-          : 'No se encontró información para mostrar.'}
-        Presenta la información de forma clara. No inventes datos. Devuelve done: true.`,
+RESTRICCIÓN CRÍTICA: Tu único rol es capturar "${data.fieldName ?? 'dato'}".
+NUNCA respondas preguntas, NUNCA confirmes ni niegues información sobre productos,
+precios, stock ni nada externo. NUNCA esperes datos adicionales de otros campos.`,
+
+      outputNode: (data) =>
+        `## Tarea actual: Presentar información
+${data.resolvedContent
+  ? `Información disponible para mostrar:\n${JSON.stringify(data.resolvedContent, null, 2)}`
+  : 'No se encontró información para mostrar.'}
+Presenta la información de forma clara. No inventes datos. Devuelve done: true.`,
 
       routerNode: (data) =>
         `## Tarea actual: Enrutar
@@ -178,23 +185,23 @@ Analiza el mensaje y determina la ruta correcta.
 Condiciones: ${JSON.stringify(data.conditions ?? [])}
 Devuelve tu decisión en "intent". No respondas preguntas — solo enruta.`,
 
-confirmationNode: (data) => {
-  const branchKeys = Object.keys(data.branches ?? {});
-  const yesKey = branchKeys.find(k =>
-    ['yes','si','sí','confirmed','true','confirm','positive'].includes(k.toLowerCase())
-  ) ?? branchKeys[0] ?? 'yes';
-  const noKey = branchKeys.find(k =>
-    ['no','rejected','false','cancel','reject','negative'].includes(k.toLowerCase())
-  ) ?? branchKeys[1] ?? 'no';
+      confirmationNode: (data) => {
+        const branchKeys = Object.keys(data.branches ?? {});
+        const yesKey = branchKeys.find(k =>
+          ['yes','si','sí','confirmed','true','confirm','positive'].includes(k.toLowerCase())
+        ) ?? branchKeys[0] ?? 'yes';
+        const noKey = branchKeys.find(k =>
+          ['no','rejected','false','cancel','reject','negative'].includes(k.toLowerCase())
+        ) ?? branchKeys[1] ?? 'no';
 
-  return `## Tarea actual: Confirmar acción
+        return `## Tarea actual: Confirmar acción
 ${data.confirmationMessage ? `Mensaje de confirmación: "${data.confirmationMessage}"` : 'Pide confirmación al usuario.'}
 ${data.summaryFields?.length ? `Muestra el resumen: ${JSON.stringify(data.summaryFields)}` : ''}
 Infiere la intención del usuario con lenguaje natural — acepta cualquier expresión afirmativa o negativa.
 Si el usuario confirma → intent: "${yesKey}", done: true.
 Si el usuario rechaza  → intent: "${noKey}",  done: true.
 Si no queda claro      → intent: "",           done: false y vuelve a preguntar.`;
-},
+      },
 
       fallbackNode: (data) =>
         `## Tarea actual: Fallback
@@ -204,6 +211,11 @@ Sé empático. Devuelve done: true.`,
       goToNode: () =>
         `## Tarea actual: Transición automática
 Devuelve un mensaje breve de transición y done: true.`,
+
+      storeNode: (data) =>
+        `## Tarea actual: Gestión de store
+El sistema gestiona "${data.objectVar}" automáticamente.
+Devuelve un mensaje de confirmación breve si corresponde. done: true.`,
     };
 
     const builder = builders[node.type];

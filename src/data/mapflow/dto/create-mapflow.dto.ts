@@ -267,7 +267,7 @@ export enum StorePermission {
   SHOW   = 'show',
 }
 
-export class StoreNodeDto {
+export class StoreNodeDataDto {
   @IsString()
   @IsNotEmpty()
   nodeId: string;
@@ -306,6 +306,11 @@ export class StoreNodeDto {
   @IsOptional()
   @IsString()
   feedbackMessage?: string;
+
+  // ── UI fields — el frontend los persiste para reconstruir el canvas ──
+@IsOptional() @IsString() label?: string;
+@IsOptional() @IsString() extractFromNodeLabel?: string;
+@IsOptional() @IsString() closeNodeLabel?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +339,7 @@ function resolveDataDto(nodeType: NodeType) {
     case 'goToNode':          return GoToNodeDataDto;
     case 'insertNode':        return InsertNodeDataDto;  // ← nuevo
     case 'apiNode':           return ApiNodeDataDto;     // ← nuevo
+     case 'storeNode':           return StoreNodeDataDto;   
     default:                  return ConversationNodeDataDto;
   }
 }
@@ -345,7 +351,7 @@ function resolveDataDto(nodeType: NodeType) {
 const NODE_TYPES: NodeType[] = [
   'conversationNode', 'intentNode', 'inputNode', 'outputNode',
   'fallbackNode', 'routerNode', 'confirmationNode', 'goToNode',
-  'insertNode', 'apiNode',   // ← nuevo
+  'insertNode', 'apiNode', 'storeNode',   // ← nuevo
 ];
 class NodeDto {
   @IsString() id: string;

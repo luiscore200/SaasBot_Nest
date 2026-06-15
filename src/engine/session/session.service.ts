@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// session/session.manager.ts  (v3 — outputCache)
+// session/session.service.ts  (v4 — activeGlobalStores)
 // ─────────────────────────────────────────────────────────────────────────────
 import { Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
@@ -9,6 +9,8 @@ import {
   ChannelType,
   FormState,
   OutputCache,
+  ActiveGlobalStore,
+  LLMMessage,
 } from '../engine.types';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -17,22 +19,16 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 export class SessionService {
   private readonly logger = new Logger(SessionService.name);
 
-  private readonly sessions = new Map<string, ChatSession>();
-
-  /**
-   * Índice inverso — agnóstico al canal:
-   *   widget    → key: `${botConfigId}::${uuidBrowser}`
-   *   whatsapp  → key: `${phoneNumberId}::${+57300...}`
-   */
+  private readonly sessions    = new Map<string, ChatSession>();
   private readonly visitorIndex = new Map<string, string>();
 
   // ── Crear o recuperar ──────────────────────────────────────────────────────
 
   getOrCreate(params: {
-    visitorId: string;
-    channelId: string;
-    channel: ChannelType;
-    config: BotRuntimeConfig;
+    visitorId:  string;
+    channelId:  string;
+    channel:    ChannelType;
+    config:     BotRuntimeConfig;
     sessionId?: string;
   }): ChatSession {
     const { visitorId, channelId, channel, config, sessionId } = params;
@@ -45,7 +41,7 @@ export class SessionService {
       }
     }
 
-    const indexKey = this.buildKey(channelId, visitorId);
+    const indexKey   = this.buildKey(channelId, visitorId);
     const existingId = this.visitorIndex.get(indexKey);
     if (existingId) {
       const existing = this.sessions.get(existingId);
@@ -59,7 +55,7 @@ export class SessionService {
     return this.create({ visitorId, channelId, channel, config });
   }
 
-  // ── Mutaciones ─────────────────────────────────────────────────────────────
+  // ── Mutaciones de formState ────────────────────────────────────────────────
 
   mergeFormState(sessionId: string, partial: FormState): void {
     const s = this.sessions.get(sessionId);
@@ -67,11 +63,10 @@ export class SessionService {
     s.formState = { ...s.formState, ...partial };
   }
 
-  /**
-   * Acumula documentos crudos en el caché del outputNode indicado.
-   * El caché es acumulativo entre páginas — nunca se sobreescribe,
-   * solo se añade — para que el inputNode siempre tenga el universo completo.
-   */
+  
+
+  // ── OutputCache ────────────────────────────────────────────────────────────
+
   appendOutputCache(sessionId: string, nodeId: string, docs: Record<string, any>[]): void {
     const s = this.sessions.get(sessionId);
     if (!s || !docs.length) return;
@@ -83,16 +78,64 @@ export class SessionService {
     );
   }
 
-  /**
-   * Devuelve el caché acumulado de un outputNode específico.
-   * Retorna array vacío si no hay caché para ese nodo.
-   */
   getOutputCache(sessionId: string, nodeId: string): Record<string, any>[] {
     const s = this.sessions.get(sessionId);
     return s?.outputCache[nodeId] ?? [];
   }
 
-  pushTurn(sessionId: string, userMsg: string, assistantMessages: string | string[]): void {
+  // ── activeGlobalStores ────────────────────────────────────────────────────
+
+  /**
+   * Registra un storeNode global en la sesión.
+   * Llamado cuando el flujo pasa por un storeNode con isGlobal: true.
+   * Si ya existe un store con el mismo nodeId, lo reemplaza (idempotente).
+   */
+  registerGlobalStore(sessionId: string, store: ActiveGlobalStore): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.activeGlobalStores = [
+      ...s.activeGlobalStores.filter(st => st.nodeId !== store.nodeId),
+      store,
+    ];
+    this.logger.log(
+      `[globalStore] REGISTER sessionId="${sessionId}" nodeId="${store.nodeId}" ` +
+      `objectVar="${store.objectVar}" permissions=${store.permissions.join(',')}`,
+    );
+  }
+
+  /**
+   * Cierra un store global. Se llama cuando el flujo llega al closeNodeId.
+   * objectVar permanece en formState — solo se deja de interceptar.
+   */
+  closeGlobalStore(sessionId: string, nodeId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    const before = s.activeGlobalStores.length;
+    s.activeGlobalStores = s.activeGlobalStores.filter(st => st.nodeId !== nodeId);
+    const after = s.activeGlobalStores.length;
+    if (before !== after) {
+      this.logger.log(
+        `[globalStore] CLOSE sessionId="${sessionId}" nodeId="${nodeId}" — ` +
+        `stores restantes=${after}`,
+      );
+    }
+  }
+
+  /**
+   * Devuelve los stores globales activos de la sesión.
+   */
+  getActiveGlobalStores(sessionId: string): ActiveGlobalStore[] {
+    return this.sessions.get(sessionId)?.activeGlobalStores ?? [];
+  }
+
+  // ── Historial ──────────────────────────────────────────────────────────────
+
+  pushTurn(
+    sessionId:          string,
+    userMsg:            string,
+    assistantMessages:  string | string[],
+    userMsgMeta?:       Partial<Pick<LLMMessage, 'interceptedBy' | 'storeAction'>>,
+  ): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
 
@@ -102,10 +145,17 @@ export class SessionService {
     this.logger.log(
       `[pushTurn] sessionId="${sessionId}"\n` +
       `  user      : "${userMsg}"\n` +
-      `  assistant : ${JSON.stringify(nonEmpty)}`,
+      `  assistant : ${JSON.stringify(nonEmpty)}` +
+      (userMsgMeta?.interceptedBy ? `\n  interceptedBy: "${userMsgMeta.interceptedBy}"` : ''),
     );
 
-    s.history.push({ role: 'user', content: userMsg });
+    const userMessage: LLMMessage = {
+      role:    'user',
+      content: userMsg,
+      ...userMsgMeta,
+    };
+
+    s.history.push(userMessage);
     if (nonEmpty.length > 0) {
       s.history.push({ role: 'assistant', content: nonEmpty.join('\n\n') });
     }
@@ -144,23 +194,24 @@ export class SessionService {
     visitorId: string; channelId: string;
     channel: ChannelType; config: BotRuntimeConfig;
   }): ChatSession {
-    const sessionId = uuidv4();
+    const sessionId  = uuidv4();
     const formState: FormState = Object.fromEntries(
       p.config.formFields.map((f) => [f.name, null]),
     );
     const session: ChatSession = {
       sessionId,
-      visitorId:     p.visitorId,
-      channelId:     p.channelId,
-      channel:       p.channel,
-      company_id:    p.config.company_id,
-      config:        p.config,
-      history:       [],
+      visitorId:          p.visitorId,
+      channelId:          p.channelId,
+      channel:            p.channel,
+      company_id:         p.config.company_id,
+      config:             p.config,
+      history:            [],
       formState,
-      outputCache:   {},   // ← inicializado vacío; outputNodes lo llenan en runtime
-      currentNodeId: p.config.startNode,
-      turns:         0,
-      lastActivity:  Date.now(),
+      outputCache:        {},
+      activeGlobalStores: [], // ← inicializado vacío
+      currentNodeId:      p.config.startNode,
+      turns:              0,
+      lastActivity:       Date.now(),
     };
     this.sessions.set(sessionId, session);
     this.visitorIndex.set(this.buildKey(p.channelId, p.visitorId), sessionId);

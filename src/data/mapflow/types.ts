@@ -122,25 +122,25 @@ export interface IntentNodeData {
 // StoreNode
 // ─────────────────────────────────────────────────────────────────────────────
 
-export enum StorePermission {
-  INSERT = "insert",
-  EDIT = "edit",
-  DELETE = "delete",
-  SHOW = "show",
-}
+  export enum StorePermission {
+    INSERT = "insert",
+    EDIT = "edit",
+    DELETE = "delete",
+    SHOW = "show",
+  }
 
-export interface StoreNodeData {
-  nodeId: string;
-  objectVar: string;
-  extractFromNodeId: string;
-  isArray: boolean;
-  isGlobal: boolean;
-  closeNodeId?: string;
-  permissions: StorePermission[];
-  feedbackVisible: boolean;
-  feedbackMessage?: string;
-}
-// ─────────────────────────────────────────────────────────────────────────────
+  export interface StoreNodeData {
+    nodeId: string;
+    objectVar: string;
+    extractFromNodeId: string;
+    isArray: boolean;
+    isGlobal: boolean;
+    closeNodeId?: string;
+    permissions: StorePermission[];
+    feedbackVisible: boolean;
+    feedbackMessage?: string;
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 // RouterNodeData
 // ─────────────────────────────────────────────────────────────────────────────
 
