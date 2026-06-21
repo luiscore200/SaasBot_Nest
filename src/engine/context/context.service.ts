@@ -23,9 +23,10 @@ export class ContextService {
    * El bot general (conversationNode, etc.) sigue viendo el contenido original,
    * preservando la coherencia conversacional.
    */
- private buildHistory(session: ChatSession, node: RuntimeNode): LLMMessage[] {
+private buildHistory(session: ChatSession, node: RuntimeNode): LLMMessage[] {
+  if (node.type === 'confirmationNode') return [];
+  
   const CLASSIFY_NODES = ['intentNode', 'confirmationNode'];
-
   const history = CLASSIFY_NODES.includes(node.type)
     ? session.history.map((msg) => {
         if (!msg.interceptedBy) return msg;
@@ -36,7 +37,6 @@ export class ContextService {
       })
     : session.history;
 
-  // ── Limpiar propiedades custom que Groq no acepta ─────────────────
   return history.map(({ role, content }) => ({ role, content }));
 }
   private buildSystemPrompt(session: ChatSession, node: RuntimeNode): string {

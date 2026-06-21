@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// engine/chat.engine.ts  (v5 — storeNode global interceptor)
+// engine/chat.engine.ts  (v6 — storeNode enriched context + resolveStoreAction)
 // ─────────────────────────────────────────────────────────────────────────────
 import {
   Injectable,
@@ -30,6 +30,8 @@ import {
   RuntimeNode,
   ChannelType,
   StorePermission,
+  StoreActionResolution,
+  VisitedNodeEntry,
 } from './engine.types';
 
 import { ChatGroqService }     from './groq/chatGroq.service';
@@ -70,8 +72,8 @@ export class EngineService {
     }
 
     // ── Intercepción de stores globales ───────────────────────────────────
-    // Se evalúa ANTES del flujo normal. Si algún store activo maneja el
-    // mensaje, se devuelve la respuesta sin avanzar el nodo actual.
+    // Se evalúa ANTES del flujo normal. Una sola LLM call resuelve qué store
+    // aplica, qué permiso ejecutar y sobre qué ítem — sin llamadas secuenciales.
     if (session.activeGlobalStores.length > 0) {
       const storeResponse = await this.processGlobalStores(session, request.message);
       if (storeResponse) return storeResponse;
@@ -91,7 +93,6 @@ export class EngineService {
 
     if (result.nextNodeId) {
       this.SessionService.setCurrentNode(session.sessionId, result.nextNodeId);
-      // ── Comprobar si el nodo al que avanzamos es un closeNodeId ──────────
       this.checkAndCloseStores(session, result.nextNodeId);
     }
 
@@ -100,55 +101,62 @@ export class EngineService {
       this.SessionService.destroy(session.sessionId);
     }
 
-    const fallback: ChatMessage = { text: 'Procesando tu solicitud...' };
     const finalMessages = result.chatMessages.filter(m => m.text?.trim());
 
-      if (finalMessages.length === 0 && !conversationDone) {
-        finalMessages.push({ text: 'Procesando tu solicitud...' });
-      }
+    if (finalMessages.length === 0 && !conversationDone) {
+      finalMessages.push({ text: 'Procesando tu solicitud...' });
+    }
 
-      return {
-        message:     finalMessages[finalMessages.length - 1]?.text ?? '',
-        messages:    finalMessages.length > 0 ? finalMessages : [{ text: '' }],
-        sessionId:   session.sessionId,
-        currentNode: result.nextNodeId ?? session.currentNodeId,
-        formState:   session.formState,
-        done:        conversationDone,
-      };
+    return {
+      message:     finalMessages[finalMessages.length - 1]?.text ?? '',
+      messages:    finalMessages.length > 0 ? finalMessages : [{ text: '' }],
+      sessionId:   session.sessionId,
+      currentNode: result.nextNodeId ?? session.currentNodeId,
+      formState:   session.formState,
+      done:        conversationDone,
+    };
   }
 
   // ── Intercepción de stores globales ───────────────────────────────────────
   //
-  // Para cada store activo, lanza un LLM call liviano y acotado que evalúa
-  // si el mensaje del usuario tiene intención de [permissions] sobre [objectVar].
+  // Diseño mejorado (v6):
   //
-  // Diseño deliberado del prompt del evaluador:
-  //  - Sin system prompt del bot (para no confundir contexto de flujo con acción de store)
-  //  - Sin historial completo (solo el estado actual de objectVar es relevante)
-  //  - Solo: objectVar, permissions, contenido actual, mensaje del usuario
+  // ANTES (v5): N llamadas LLM independientes, una por store activo.
+  //   → Ambigüedad cuando dos stores tienen permisos similares.
+  //   → Primer match en orden de array "gana", sin base semántica.
   //
-  // Si algún store intercepta: ejecuta la acción, etiqueta el historial,
-  // opcionalmente devuelve feedbackMessage, y retorna sin avanzar el flujo.
-  // Si ninguno intercepta: devuelve null → el engine continúa con el flujo normal.
+  // AHORA (v6): resolveStoreAction — una sola LLM call que:
+  //   1. Ve todos los stores activos simultáneamente con contexto semántico
+  //      completo (description, triggerPhrases, avoidPhrases, contenido legible).
+  //   2. Decide a cuál store aplica el mensaje del usuario (comparación directa).
+  //   3. Determina permission + item en la misma inferencia.
+  //
+  // Optimización: si solo hay 1 store activo, se llama a evaluateSingleStore
+  // directamente (sin overhead de selección entre múltiples).
 
 private async processGlobalStores(
-  session:     ChatSession,
-  userMessage: string,
-): Promise<ChatResponse | null> {
-  for (const store of session.activeGlobalStores) {
-    const result = await this.evaluateStoreIntent(store, session.formState, userMessage);
+    session:     ChatSession,
+    userMessage: string,
+  ): Promise<ChatResponse | null> {
 
-    if (!result.matched) continue;
+    const resolution = session.activeGlobalStores.length === 1
+      ? await this.evaluateSingleStore(session.activeGlobalStores[0], session.formState, userMessage)
+      : await this.resolveStoreAction(session.activeGlobalStores, session.formState, userMessage);
+
+    if (!resolution.matched || !resolution.storeNodeId) return null;
+
+    const store = session.activeGlobalStores.find(s => s.nodeId === resolution.storeNodeId);
+    if (!store) return null;
 
     this.logger.log(
       `[globalStore] INTERCEPTADO nodeId="${store.nodeId}" ` +
-      `permission="${result.permission}" item="${result.item}"`,
+      `objectVar="${store.objectVar}" permission="${resolution.permission}" item="${resolution.item}"`,
     );
 
     // ── Ejecutar la acción sobre formState ─────────────────────────────
-  const actionResult = this.executeStoreAction(
-  store, result.permission!, result.item, session.formState, session.sessionId,
-);
+    const actionResult = this.executeStoreAction(
+      store, resolution.permission!, resolution.item, session.formState, session.sessionId,
+    );
 
     this.SessionService.mergeFormState(session.sessionId, {
       [store.objectVar]: actionResult.newValue,
@@ -158,8 +166,8 @@ private async processGlobalStores(
     const feedbackText = store.feedbackVisible
       ? this.resolveStoreTemplate(
           store.feedbackMessage ?? '',
-          result.item,
-          result.permission!,
+          resolution.item,
+          resolution.permission!,
           actionResult.newValue,
           session.formState,
         )
@@ -173,8 +181,8 @@ private async processGlobalStores(
         interceptedBy: store.nodeId,
         storeAction: {
           nodeId:     store.nodeId,
-          permission: result.permission!,
-          item:       result.item,
+          permission: resolution.permission!,
+          item:       resolution.item,
           result:     actionResult.success ? 'success' : 'error',
         },
       },
@@ -182,12 +190,32 @@ private async processGlobalStores(
 
     const messages: ChatMessage[] = feedbackText ? [{ text: feedbackText }] : [];
 
-    // ── Refrescar sesión y re-ejecutar el nodo pendiente ──────────────
-    const freshSession = this.SessionService.get(session.sessionId)!;
+    // ── Resolver dónde reanudar (en código, sin LLM) y refrescar sesión ────
+    const freshSession  = this.SessionService.get(session.sessionId)!;
+    const resumeAnchor  = this.findResumeAnchorNode(freshSession);
+
+    if (resumeAnchor) {
+      this.SessionService.setCurrentNode(freshSession.sessionId, resumeAnchor.nodeId);
+      this.logger.log(
+        `[globalStore] RESUME → nodeId="${resumeAnchor.nodeId}" (resuelto por código, sin LLM)`,
+      );
+    } else {
+      this.logger.warn(
+        `[globalStore] RESUME — no se encontró nodo-ancla válido en nodeHistory, ` +
+        `se continúa desde currentNodeId="${freshSession.currentNodeId}"`,
+      );
+    }
+
     const resumeResult = await this.runNodeChain(freshSession, '');
 
-    if (resumeResult.message?.trim()) {
-      messages.push({ text: resumeResult.message });
+    const freshSession2 = this.SessionService.get(session.sessionId)!;
+
+    const resumeMessage = resumeResult.message?.trim()
+      ? resumeResult.message
+      : resumeAnchor?.message ?? '';
+
+    if (resumeMessage) {
+      messages.push({ text: resumeMessage });
     }
 
     if (resumeResult.nextNodeId) {
@@ -205,21 +233,25 @@ private async processGlobalStores(
     };
   }
 
-  return null; // ningún store interceptó — continuar flujo normal
-}
-
-  // ── LLM liviano: evaluar intención del store ───────────────────────────────
+  // ── resolveStoreAction — LLM call unificada (2+ stores activos) ───────────
   //
-  // Prompt muy acotado. No recibe historial, no recibe system prompt del bot.
-  // Solo lo estrictamente necesario para clasificar si el mensaje es una acción
-  // de [permissions] sobre [objectVar].
+  // Una sola inferencia que compara todos los stores simultáneamente y resuelve:
+  //   - storeNodeId: qué store aplica (o null si ninguno)
+  //   - permission:  qué acción quiere el usuario
+  //   - item:        sobre qué ítem actúa
+  //
+  // El prompt incluye por cada store:
+  //   - description:    qué representa en el dominio (contexto semántico real)
+  //   - triggerPhrases: ejemplos few-shot de frases que SÍ aplican
+  //   - avoidPhrases:   ejemplos few-shot de frases que NO aplican (apuntan a otro store)
+  //   - contenido actual legible (nombres, no JSON crudo)
+  //   - permisos disponibles con descripciones en lenguaje natural
 
-  private async evaluateStoreIntent(
-    store:      ActiveGlobalStore,
-    formState:  FormState,
+  private async resolveStoreAction(
+    stores:      ActiveGlobalStore[],
+    formState:   FormState,
     userMessage: string,
-  ): Promise<{ matched: boolean; permission?: StorePermission; item: string }> {
-    const currentValue = formState[store.objectVar];
+  ): Promise<StoreActionResolution> {
 
     const permissionDescriptions: Record<StorePermission, string> = {
       [StorePermission.INSERT]: 'agregar, añadir, incluir o poner un ítem nuevo',
@@ -228,32 +260,138 @@ private async processGlobalStores(
       [StorePermission.SHOW]:   'ver, mostrar, listar o consultar los ítems',
     };
 
+    const storesSummary = stores.map(store => {
+      const currentValue = formState[store.objectVar];
+
+      // Serializar contenido actual de forma legible (nombres, no JSON crudo)
+      const contentReadable = this.formatStoreContentReadable(currentValue);
+
+      const permissionsText = store.permissions
+        .map(p => `    - "${p}": ${permissionDescriptions[p]}`)
+        .join('\n');
+
+      return [
+        `  nodeId: "${store.nodeId}"`,
+        `  variable: "${store.objectVar}"`,
+        `  descripción: ${store.description || '(sin descripción)'}`,
+        store.triggerPhrases
+          ? `  frases que indican ESTE store: ${store.triggerPhrases}`
+          : null,
+        store.avoidPhrases
+          ? `  frases que indican OTRO store (no este): ${store.avoidPhrases}`
+          : null,
+        `  contenido actual: ${contentReadable}`,
+        `  permisos disponibles:\n${permissionsText}`,
+      ].filter(Boolean).join('\n');
+    }).join('\n\n---\n\n');
+
+    const allPermissions = [...new Set(stores.flatMap(s => s.permissions))];
+
+    const prompt = `Eres un clasificador de intenciones para múltiples listas/colecciones activas.
+
+El usuario escribió: "${userMessage}"
+
+Stores disponibles:
+---
+${storesSummary}
+---
+
+Tu tarea:
+1. Determina a cuál store se refiere el mensaje del usuario.
+   Usa la descripción, las frases indicadoras y el contenido actual de cada store.
+   Dos stores pueden tener permisos similares — la descripción y las frases son la clave para distinguirlos.
+
+2. Si el mensaje aplica a algún store, determina:
+   - Qué acción quiere el usuario (según los permisos de ESE store)
+   - Sobre qué ítem actúa (extrae el nombre o descripción del ítem del mensaje, o "" para show/list)
+
+3. Si el mensaje NO aplica a ningún store (es una pregunta general, saludo, o tema diferente):
+   - matched: false
+
+Responde ÚNICAMENTE con JSON válido (sin markdown):
+{
+  "matched": true,
+  "storeNodeId": "<nodeId del store seleccionado, o null>",
+  "permission": "${allPermissions.join('" | "')}",
+  "item": "<ítem extraído del mensaje, o vacío>"
+}`;
+
+    try {
+      const result = await this.groq.rawCall<{
+        matched:     boolean;
+        storeNodeId: string | null;
+        permission:  StorePermission | null;
+        item:        string;
+      }>(prompt, userMessage);
+
+      if (!result || typeof result.matched !== 'boolean') {
+        return { matched: false, storeNodeId: null, permission: null, item: '' };
+      }
+
+      this.logger.log(
+        `[resolveStoreAction] matched=${result.matched} ` +
+        `storeNodeId="${result.storeNodeId}" ` +
+        `permission="${result.permission}" item="${result.item}"`,
+      );
+
+      return {
+        matched:     result.matched === true,
+        storeNodeId: result.matched ? (result.storeNodeId ?? null) : null,
+        permission:  result.matched ? (result.permission ?? null) : null,
+        item:        result.item ?? '',
+      };
+    } catch (err: any) {
+      this.logger.error(`[resolveStoreAction] LLM error: ${err.message}`);
+      return { matched: false, storeNodeId: null, permission: null, item: '' };
+    }
+  }
+
+  // ── evaluateSingleStore — optimización para 1 solo store activo ───────────
+  //
+  // Cuando solo hay un store activo, no hace falta seleccionarlo — se evalúa
+  // directamente. El prompt es más acotado (sin comparación entre stores).
+  // Equivalente al evaluateStoreIntent original pero con contexto semántico.
+
+  private async evaluateSingleStore(
+    store:       ActiveGlobalStore,
+    formState:   FormState,
+    userMessage: string,
+  ): Promise<StoreActionResolution> {
+
+    const permissionDescriptions: Record<StorePermission, string> = {
+      [StorePermission.INSERT]: 'agregar, añadir, incluir o poner un ítem nuevo',
+      [StorePermission.EDIT]:   'modificar, cambiar, editar o actualizar un ítem existente',
+      [StorePermission.DELETE]: 'quitar, eliminar, borrar o remover un ítem',
+      [StorePermission.SHOW]:   'ver, mostrar, listar o consultar los ítems',
+    };
+
+    const currentValue    = formState[store.objectVar];
+    const contentReadable = this.formatStoreContentReadable(currentValue);
+
     const permissionsText = store.permissions
       .map(p => `- "${p}": ${permissionDescriptions[p]}`)
       .join('\n');
 
-    const currentValueText = currentValue !== null && currentValue !== undefined
-      ? JSON.stringify(currentValue)
-      : '(vacío)';
-
-    const prompt = `Eres un clasificador de intenciones para un carrito/lista de ítems.
+    const prompt = `Eres un clasificador de intenciones para una lista/colección.
 
 Variable gestionada: "${store.objectVar}"
-Contenido actual: ${currentValueText}
+${store.description ? `Descripción: ${store.description}` : ''}
+${store.triggerPhrases ? `Frases que indican acción sobre esta lista: ${store.triggerPhrases}` : ''}
+Contenido actual: ${contentReadable}
 
 Permisos disponibles:
 ${permissionsText}
 
 Mensaje del usuario: "${userMessage}"
 
-Determina si el mensaje del usuario tiene la intención de realizar alguna de las acciones listadas sobre "${store.objectVar}".
+Determina si el mensaje tiene la intención de realizar alguna de las acciones listadas.
 
-Si SÍ tiene esa intención:
+Si SÍ:
 - "matched": true
 - "permission": el ID exacto del permiso ("${store.permissions.join('" | "')}")
-- "item": el ítem o descripción sobre el que actúa (texto extraído del mensaje, o "" si es show/list)
+- "item": el ítem o descripción sobre el que actúa (o "" si es show/list)
 
-Si NO tiene esa intención (es una pregunta general, saludo, o no relacionada):
+Si NO (pregunta general, saludo, o no relacionado):
 - "matched": false
 - "permission": null
 - "item": ""
@@ -268,18 +406,51 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
       }>(prompt, userMessage);
 
       if (!result || typeof result.matched !== 'boolean') {
-        return { matched: false, item: '' };
+        return { matched: false, storeNodeId: null, permission: null, item: '' };
       }
 
+      this.logger.log(
+        `[evaluateSingleStore] nodeId="${store.nodeId}" matched=${result.matched} ` +
+        `permission="${result.permission}" item="${result.item}"`,
+      );
+
       return {
-        matched:    result.matched === true,
-        permission: result.matched ? (result.permission ?? undefined) : undefined,
-        item:       result.item ?? '',
+        matched:     result.matched === true,
+        storeNodeId: result.matched ? store.nodeId : null,
+        permission:  result.matched ? (result.permission ?? null) : null,
+        item:        result.item ?? '',
       };
     } catch (err: any) {
-      this.logger.error(`[evaluateStoreIntent] LLM error: ${err.message}`);
-      return { matched: false, item: '' };
+      this.logger.error(`[evaluateSingleStore] LLM error: ${err.message}`);
+      return { matched: false, storeNodeId: null, permission: null, item: '' };
     }
+  }
+
+  // ── formatStoreContentReadable — serialización legible del contenido ───────
+  //
+  // Convierte el valor de formState[objectVar] a texto plano legible para el LLM.
+  // Evita JSON crudo — el LLM razona mejor con "Ibuprofeno, Amoxicilina"
+  // que con [{"nombre":"Ibuprofeno","precio":500,...}].
+
+  private formatStoreContentReadable(value: any): string {
+    if (value === null || value === undefined) return '(vacío)';
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) return '(vacío)';
+      const names = value.map((entry: any) => {
+        const d = entry?.data ?? entry ?? {};
+        return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '');
+      }).filter(Boolean);
+      return names.length > 0 ? names.join(', ') : `${value.length} ítem(s)`;
+    }
+
+    if (typeof value === 'object') {
+      const d = (value as any)?.data ?? value;
+      const name = d.nombre ?? d.name ?? d.label;
+      return name ? String(name) : JSON.stringify(value);
+    }
+
+    return String(value);
   }
 
   // ── Ejecutar acción del store sobre formState ──────────────────────────────
@@ -289,54 +460,50 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
     permission: StorePermission,
     item:       string,
     formState:  FormState,
-      sessionId:  string,   
+    sessionId:  string,
   ): { newValue: any; success: boolean } {
     const current = formState[store.objectVar];
 
     try {
       switch (permission) {
         case StorePermission.INSERT: {
-            if (store.isArray) {
-    const arr = Array.isArray(current) ? [...current] : [];
-    
-         // Buscar el doc real en el outputCache por nombre
-          const sourceDocs = this.SessionService.getOutputCache(
-            sessionId, store.extractFromNodeId  // ← necesitas session aquí
-          );
-          const itemLower = item.toLowerCase();
-          const matched = sourceDocs.find((doc: any) => {
-            const d = doc?.data ?? doc ?? {};
-            const name = (d.nombre ?? d.name ?? d.label ?? '').toLowerCase();
-            return name.includes(itemLower);
-          });
+          if (store.isArray) {
+            const arr = Array.isArray(current) ? [...current] : [];
 
-          arr.push(matched ?? { name: item, addedAt: new Date().toISOString() });
-          return { newValue: arr, success: true };
-        }
+            // Buscar el doc real en outputCache por nombre
+            const sourceDocs = this.SessionService.getOutputCache(
+              sessionId, store.extractFromNodeId,
+            );
+            const itemLower = item.toLowerCase();
+            const matched = sourceDocs.find((doc: any) => {
+              const d = doc?.data ?? doc ?? {};
+              const name = (d.nombre ?? d.name ?? d.label ?? '').toLowerCase();
+              return name.includes(itemLower);
+            });
+
+            arr.push(matched ?? { name: item, addedAt: new Date().toISOString() });
+            return { newValue: arr, success: true };
+          }
 
           return { newValue: { name: item, addedAt: new Date().toISOString() }, success: true };
         }
 
         case StorePermission.DELETE: {
-        if (store.isArray && Array.isArray(current)) {
-          const filtered = current.filter((entry: any) => {
-            const d = entry?.data ?? entry ?? {};
-            // buscar en todos los campos string del objeto
-            const entryName = (
-              d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '')
-            ).toLowerCase();
-            return !entryName.includes(item.toLowerCase());
-          });
-          return { newValue: filtered, success: true };
+          if (store.isArray && Array.isArray(current)) {
+            const filtered = current.filter((entry: any) => {
+              const d = entry?.data ?? entry ?? {};
+              const entryName = (
+                d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '')
+              ).toLowerCase();
+              return !entryName.includes(item.toLowerCase());
+            });
+            return { newValue: filtered, success: true };
+          }
+          return { newValue: null, success: true };
         }
-        return { newValue: null, success: true };
-      }
 
         case StorePermission.EDIT: {
           if (store.isArray && Array.isArray(current)) {
-            // Para edit: el LLM ya extrajo el ítem como "nombre:nuevoValor"
-            // o directamente el nombre del ítem a reemplazar.
-            // Estrategia simple: reemplazar el primero que haga match por nombre.
             const [targetName, ...rest] = item.split(':');
             const newItemData           = rest.join(':').trim() || item;
             const updated = current.map((entry: any) => {
@@ -349,13 +516,16 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
             return { newValue: updated, success: true };
           }
           return {
-            newValue: { ...(typeof current === 'object' ? current : {}), name: item, updatedAt: new Date().toISOString() },
+            newValue: {
+              ...(typeof current === 'object' ? current : {}),
+              name: item,
+              updatedAt: new Date().toISOString(),
+            },
             success: true,
           };
         }
 
         case StorePermission.SHOW:
-          // SHOW no muta el valor — solo lee. El feedbackMessage lo muestra.
           return { newValue: current, success: true };
 
         default:
@@ -368,8 +538,6 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
   }
 
   // ── Resolver template del feedbackMessage ─────────────────────────────────
-  //
-  // Soporta: ${item}, ${objectVar}, ${count} y ${form.campo}
 
   private resolveStoreTemplate(
     template:   string,
@@ -377,14 +545,12 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
     permission: StorePermission,
     newValue:   any,
     formState:  FormState,
-    matched:    Record<string, any>[] = [],
   ): string {
-      if (!template.trim()) {
-    // Fallback automático igual que node.service.ts
-    return this.buildDefaultGlobalFeedback(permission, item, newValue);
-     }
+    if (!template.trim()) {
+      return this.buildDefaultGlobalFeedback(permission, item, newValue);
+    }
 
-    const count = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
+    const count   = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
     const listStr = Array.isArray(newValue)
       ? newValue.map((e: any) => e?.name ?? e?.label ?? String(e)).join(', ')
       : '';
@@ -401,33 +567,34 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
   }
 
   private buildDefaultGlobalFeedback(
-  permission: StorePermission,
-  item:       string,
-  newValue:   any,
-): string {
-  const count  = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
-  const plural = count === 1 ? 'producto' : 'productos';
+    permission: StorePermission,
+    item:       string,
+    newValue:   any,
+  ): string {
+    const count  = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
+    const plural = count === 1 ? 'producto' : 'productos';
 
-  switch (permission) {
-    case StorePermission.INSERT:
-      return `He agregado "${item}" a tu lista. Ahora tienes ${count} ${plural}.`;
-    case StorePermission.DELETE:
-      return `He eliminado "${item}" de tu lista. Te quedan ${count} ${plural}.`;
-    case StorePermission.EDIT:
-      return `He actualizado "${item}".`;
-    case StorePermission.SHOW: {
-      const list = Array.isArray(newValue)
-        ? newValue.map((e: any) => {
-            const d = e?.data ?? e ?? {};
-            return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '');
-          }).join(', ')
-        : String(newValue ?? '');
-      return list ? `Tu lista contiene: ${list}.` : 'Tu lista está vacía.';
+    switch (permission) {
+      case StorePermission.INSERT:
+        return `He agregado "${item}" a tu lista. Ahora tienes ${count} ${plural}.`;
+      case StorePermission.DELETE:
+        return `He eliminado "${item}" de tu lista. Te quedan ${count} ${plural}.`;
+      case StorePermission.EDIT:
+        return `He actualizado "${item}".`;
+      case StorePermission.SHOW: {
+        const list = Array.isArray(newValue)
+          ? newValue.map((e: any) => {
+              const d = e?.data ?? e ?? {};
+              return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '');
+            }).join(', ')
+          : String(newValue ?? '');
+        return list ? `Tu lista contiene: ${list}.` : 'Tu lista está vacía.';
+      }
+      default:
+        return '';
     }
-    default:
-      return '';
   }
-}
+
   // ── Comprobar y cerrar stores cuyo closeNodeId acaba de alcanzarse ─────────
 
   private checkAndCloseStores(session: ChatSession, arrivedNodeId: string): void {
@@ -469,9 +636,8 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
       this.checkAndCloseStores(session, result.nextNodeId);
     }
 
-    const fallback: ChatMessage = { text: 'Procesando...' };
     const finalMessages = result.chatMessages.filter(m => m.text?.trim());
-    if (finalMessages.length === 0) finalMessages.push(fallback);
+    if (finalMessages.length === 0) finalMessages.push({ text: 'Procesando...' });
 
     return {
       message:     finalMessages[finalMessages.length - 1].text,
@@ -490,100 +656,143 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
     'conversationNode', 'insertNode', 'apiNode', 'storeNode',
   ];
 
+  // ── Trackeo de nodos ────────────────────────────────────
+
+// ── Trackeo de nodos ────────────────────────────────────
+
+  private readonly RESUME_ANCHOR_TYPES: NodeType[] = [
+    'conversationNode', 'inputNode', 'confirmationNode',
+  ];
+
+ private pushNodeHistory(session: ChatSession, nodeId: string, type: NodeType, message: string, turn: number): void {
+    if (!this.RESUME_ANCHOR_TYPES.includes(type)) return;
+    if (!message?.trim()) return;
+
+    const entry: VisitedNodeEntry = { nodeId, type, message: message.trim(), turn };
+    this.SessionService.appendNodeHistory(session.sessionId, entry);
+  }
+
+  // ── findResumeAnchorNode — resuelve en código, sin LLM, dónde reanudar ────
+  //
+  // El nodo correcto para reanudar tras una intercepción de store es, en la
+  // inmensa mayoría de los casos, el último nodo-ancla (conversationNode,
+  // inputNode o confirmationNode) que quedó esperando algo del usuario antes
+  // de que el store interceptara. No hace falta inferencia para esto — el
+  // propio nodeHistory, en orden cronológico, ya contiene la respuesta.
+  //
+  // Se valida además que el nodeId siga existiendo en runtimeNodes y que su
+  // tipo actual siga siendo uno de los aptos para resume (por si el flow fue
+  // editado entre sesiones).
+
+  private findResumeAnchorNode(session: ChatSession): { nodeId: string; message: string } | null {
+    for (let i = session.nodeHistory.length - 1; i >= 0; i--) {
+      const entry = session.nodeHistory[i];
+      if (!this.RESUME_ANCHOR_TYPES.includes(entry.type) || !entry.message) continue;
+
+      const node = session.config.runtimeNodes[entry.nodeId];
+      if (!node || !this.RESUME_ANCHOR_TYPES.includes(node.type as NodeType)) continue;
+
+      return { nodeId: entry.nodeId, message: entry.message };
+    }
+    return null;
+  }
   // ── Chain de nodos ────────────────────────────────────────────────────────
 
- private async runNodeChain(
-  session:     ChatSession,
-  userMessage: string,
-): Promise<NodeResult & { data: FormState; chatMessages: ChatMessage[]; lastNodeId: string }> {
-  let node = await this.resolveCurrentNode(session);
-  let contextMessages = this.ContextService.build(session, node);
-  let lastNodeId = node.id;  // ← trackear el último nodo ejecutado
-
-  if (node.type !== 'intentNode') {
-    session.formState['__previousNodeId'] = session.currentNodeId;
-  }
-
-  let result = await this.NodeService.run({
-    session, node, userMessage, contextMessages,
-  });
-
-  if (Object.keys(result.data).length > 0) {
-    this.SessionService.mergeFormState(session.sessionId, result.data);
-  }
-
-  const chatMessages: ChatMessage[] = [];
-  if (result.message.trim()) {
-    chatMessages.push(this.buildChatMessage(result, node));
-  }
-
-  const MAX_CHAIN = 5;
-  let chainCount  = 0;
-
-  while (result.done && result.nextNodeId && chainCount < MAX_CHAIN) {
-    const nextNode = session.config.runtimeNodes[result.nextNodeId];
-    if (!nextNode) break;
-
-    this.checkAndCloseStores(session, result.nextNodeId);
-
-    const isImplicitInput =
-      nextNode.type === 'inputNode' && nextNode.data?.implicit === true;
-
-    const isAutoConfirmation =
-      nextNode.type === 'confirmationNode' &&
-      chatMessages.filter(m => m.text?.trim()).length === 0;
-
-    if (
-      !this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) &&
-      !isImplicitInput &&
-      !isAutoConfirmation
-    ) {
-      break;
-    }
-
-    if (this.shouldBlockConversationNode(nextNode)) break;
-
-    session = {
-      ...session,
-      currentNodeId: result.nextNodeId,
-      formState: this.SessionService.get(session.sessionId)?.formState ?? session.formState,
-    };
-
-    node            = nextNode;
-    lastNodeId      = node.id;  // ← actualizar en cada salto
-    contextMessages = this.ContextService.build(session, node);
+  private async runNodeChain(
+    session:     ChatSession,
+    userMessage: string,
+  ): Promise<NodeResult & { data: FormState; chatMessages: ChatMessage[]; lastNodeId: string }> {
+    let node = await this.resolveCurrentNode(session);
+    let contextMessages = this.ContextService.build(session, node);
+    let lastNodeId = node.id;
 
     if (node.type !== 'intentNode') {
       session.formState['__previousNodeId'] = session.currentNodeId;
     }
 
-    const nextResult = await this.NodeService.run({
+    let result = await this.NodeService.run({
       session, node, userMessage, contextMessages,
     });
 
-    if (Object.keys(nextResult.data).length > 0) {
-      this.SessionService.mergeFormState(session.sessionId, nextResult.data);
+    if (Object.keys(result.data).length > 0) {
+      this.SessionService.mergeFormState(session.sessionId, result.data);
     }
 
-    if (nextResult.message.trim()) {
-      chatMessages.push(this.buildChatMessage(nextResult, node));
+    const chatMessages: ChatMessage[] = [];
+    if (result.message.trim()) {
+      chatMessages.push(this.buildChatMessage(result, node));
+      this.pushNodeHistory(session, node.id, node.type as NodeType, result.message, session.turns); // ← nuevo
+
     }
 
-    result = nextResult;
-    chainCount++;
+    const MAX_CHAIN = 5;
+    let chainCount  = 0;
+
+    while (result.done && result.nextNodeId && chainCount < MAX_CHAIN) {
+      const nextNode = session.config.runtimeNodes[result.nextNodeId];
+      if (!nextNode) break;
+
+      this.checkAndCloseStores(session, result.nextNodeId);
+
+      const isImplicitInput =
+        nextNode.type === 'inputNode' && nextNode.data?.implicit === true;
+
+      const isAutoConfirmation =
+        nextNode.type === 'confirmationNode' &&
+        chatMessages.filter(m => m.text?.trim()).length === 0;
+
+      if (
+        !this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) &&
+        !isImplicitInput &&
+        !isAutoConfirmation
+      ) {
+        break;
+      }
+
+      if (this.shouldBlockConversationNode(nextNode)) break;
+
+      session = {
+        ...session,
+        currentNodeId: result.nextNodeId,
+        formState: this.SessionService.get(session.sessionId)?.formState ?? session.formState,
+      };
+
+      node            = nextNode;
+      lastNodeId      = node.id;
+      contextMessages = this.ContextService.build(session, node);
+
+      if (node.type !== 'intentNode') {
+        session.formState['__previousNodeId'] = session.currentNodeId;
+      }
+
+      const nextResult = await this.NodeService.run({
+        session, node, userMessage, contextMessages,
+      });
+
+      if (Object.keys(nextResult.data).length > 0) {
+        this.SessionService.mergeFormState(session.sessionId, nextResult.data);
+      }
+
+      if (nextResult.message.trim()) {
+        chatMessages.push(this.buildChatMessage(nextResult, node));
+          this.pushNodeHistory(session, node.id, node.type as NodeType, nextResult.message, session.turns); // ← nuevo
+
+      }
+
+      result = nextResult;
+      chainCount++;
+    }
+
+    this.SessionService.setCurrentNode(session.sessionId, lastNodeId);
+
+    return {
+      ...result,
+      message:      chatMessages[chatMessages.length - 1]?.text ?? '',
+      chatMessages,
+      data:         session.formState,
+      lastNodeId,
+    };
   }
-
-  // ── Sincronizar currentNodeId con el último nodo que ejecutó ──────────
-  this.SessionService.setCurrentNode(session.sessionId, lastNodeId);
-
-  return {
-    ...result,
-    message:      chatMessages[chatMessages.length - 1]?.text ?? '',
-    chatMessages,
-    data:         session.formState,
-    lastNodeId,
-  };
-}
 
   private buildChatMessage(
     result: NodeResult & { pagination?: PaginationEntry },
@@ -729,4 +938,5 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
       done:        true,
     };
   }
+  
 }

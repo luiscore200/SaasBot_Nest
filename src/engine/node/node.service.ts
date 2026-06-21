@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// engine/node/node.service.ts  (v2 — storeNode)
+// engine/node/node.service.ts  (v3 — storeNode enriched context)
 // ─────────────────────────────────────────────────────────────────────────────
 import { Injectable, Logger } from '@nestjs/common';
 import { LLMMessage, RuntimeNode, ChatSession, FormState, StorePermission, ActiveGlobalStore } from '../engine.types';
@@ -234,96 +234,94 @@ export class NodeService {
 
   // ── confirmationNode ───────────────────────────────────────────────────────
 
-private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
+  private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
 
-  if (!ctx.userMessage?.trim()) {
-    return {
-      message:    ctx.node.data?.confirmationMessage ?? '¿Confirmas?',
-      data:       {},
-      done:       false,
-      nextNodeId: undefined,
-      intent:     '',
-    };
-  }
-
-  const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
-  const rawIntent   = llmResponse.intent?.trim() ?? '';
-
-  this.logger.log(
-    `[confirmationNode] id="${ctx.node.id}"\n` +
-    `  userMessage : "${ctx.userMessage}"\n` +
-    `  llm.message : "${llmResponse.message}"\n` +
-    `  llm.intent  : "${rawIntent}"\n` +
-    `  llm.done    : ${llmResponse.done}\n` +
-    `  branches    : ${JSON.stringify(Object.keys(ctx.node.branches ?? {}))}\n` +
-    `  match       : ${ctx.node.branches?.[rawIntent] ? `YES → "${ctx.node.branches[rawIntent]}"` : 'NO'}`,
-  );
-
-  
-  // ── Sin branches configuradas → comportamiento lineal ─────────────────
- if (!Object.keys(ctx.node.branches ?? {}).length) {
-  const lower = rawIntent.toLowerCase();
-  const POSITIVE = ['yes', 'si', 'sí', 'confirmed', 'true', 'confirm', 'affirmative'];
-  const NEGATIVE = ['no', 'rejected', 'cancel', 'false', 'reject', 'negative'];
-
-  const isPositive = POSITIVE.includes(lower);
-  const isNegative = NEGATIVE.includes(lower);
-
-  if (isPositive || isNegative) {
-    return {
-      message:    '',
-      data:       {},
-      done:       true,        // ← ambos cierran el nodo
-      nextNodeId: ctx.node.next?.[0],
-      intent:     rawIntent,
-    };
-  }
-
-  // No clasificó — seguir esperando
-  return {
-    message:    llmResponse.message,
-    data:       {},
-    done:       false,
-    nextNodeId: undefined,
-    intent:     '',
-  };
-}
-
-  let intent = rawIntent;
-
-  if (!ctx.node.branches?.[intent]) {
-    const lower      = rawIntent.toLowerCase();
-    const POSITIVE   = ['yes', 'confirmed', 'si', 'sí', 'true', 'confirm', 'affirmative'];
-    const NEGATIVE   = ['no', 'rejected', 'cancel', 'false', 'reject', 'negative'];
-    const branchKeys = Object.keys(ctx.node.branches ?? {});
-
-    if (POSITIVE.includes(lower)) {
-      intent = branchKeys.find(k => POSITIVE.includes(k.toLowerCase())) ?? '';
-    } else if (NEGATIVE.includes(lower)) {
-      intent = branchKeys.find(k => NEGATIVE.includes(k.toLowerCase())) ?? '';
-    } else {
-      intent = '';
+    if (!ctx.userMessage?.trim()) {
+      return {
+        message:    ctx.node.data?.confirmationMessage ?? '¿Confirmas?',
+        data:       {},
+        done:       false,
+        nextNodeId: undefined,
+        intent:     '',
+      };
     }
 
-    if (intent) {
-      this.logger.warn(
-        `[confirmationNode] intent "${rawIntent}" no era branch válida — mapeado a "${intent}"`,
-      );
+    const llmResponse = await this.groq.respond(ctx.contextMessages, ctx.userMessage);
+    const rawIntent   = llmResponse.intent?.trim() ?? '';
+
+    this.logger.log(
+      `[confirmationNode] id="${ctx.node.id}"\n` +
+      `  userMessage : "${ctx.userMessage}"\n` +
+      `  llm.message : "${llmResponse.message}"\n` +
+      `  llm.intent  : "${rawIntent}"\n` +
+      `  llm.done    : ${llmResponse.done}\n` +
+      `  branches    : ${JSON.stringify(Object.keys(ctx.node.branches ?? {}))}\n` +
+      `  match       : ${ctx.node.branches?.[rawIntent] ? `YES → "${ctx.node.branches[rawIntent]}"` : 'NO'}`,
+    );
+
+    // ── Sin branches configuradas → comportamiento lineal ─────────────────
+    if (!Object.keys(ctx.node.branches ?? {}).length) {
+      const lower = rawIntent.toLowerCase();
+      const POSITIVE = ['yes', 'si', 'sí', 'confirmed', 'true', 'confirm', 'affirmative'];
+      const NEGATIVE = ['no', 'rejected', 'cancel', 'false', 'reject', 'negative'];
+
+      const isPositive = POSITIVE.includes(lower);
+      const isNegative = NEGATIVE.includes(lower);
+
+      if (isPositive || isNegative) {
+        return {
+          message:    '',
+          data:       {},
+          done:       true,
+          nextNodeId: ctx.node.next?.[0],
+          intent:     rawIntent,
+        };
+      }
+
+      return {
+        message:    llmResponse.message,
+        data:       {},
+        done:       false,
+        nextNodeId: undefined,
+        intent:     '',
+      };
     }
+
+    let intent = rawIntent;
+
+    if (!ctx.node.branches?.[intent]) {
+      const lower      = rawIntent.toLowerCase();
+      const POSITIVE   = ['yes', 'confirmed', 'si', 'sí', 'true', 'confirm', 'affirmative'];
+      const NEGATIVE   = ['no', 'rejected', 'cancel', 'false', 'reject', 'negative'];
+      const branchKeys = Object.keys(ctx.node.branches ?? {});
+
+      if (POSITIVE.includes(lower)) {
+        intent = branchKeys.find(k => POSITIVE.includes(k.toLowerCase())) ?? '';
+      } else if (NEGATIVE.includes(lower)) {
+        intent = branchKeys.find(k => NEGATIVE.includes(k.toLowerCase())) ?? '';
+      } else {
+        intent = '';
+      }
+
+      if (intent) {
+        this.logger.warn(
+          `[confirmationNode] intent "${rawIntent}" no era branch válida — mapeado a "${intent}"`,
+        );
+      }
+    }
+
+    const nextNodeId = intent
+      ? ctx.node.branches?.[intent] ?? ctx.node.next?.[0]
+      : undefined;
+
+    return {
+      message:    intent ? '' : llmResponse.message,
+      data:       {},
+      done:       intent !== '',
+      nextNodeId,
+      intent,
+    };
   }
-
-  const nextNodeId = intent
-    ? ctx.node.branches?.[intent] ?? ctx.node.next?.[0]
-    : undefined;
-
-  return {
-    message:    intent ? '' : llmResponse.message,
-    data:       {},
-    done:       intent !== '',
-    nextNodeId,
-    intent,
-  };
-}
 
   // ── fallbackNode ───────────────────────────────────────────────────────────
 
@@ -370,32 +368,35 @@ private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
   // ── storeNode ──────────────────────────────────────────────────────────────
 
   /**
-   * Ambos modos procesan PRIMERO el mensaje que disparó esta ruta (extracción
-   * de ítems del extractFromNodeId y acumulación en objectVar) — este es el
-   * mismo mensaje que el intentNode ya clasificó como "acción sobre el store".
-   *
-   * isGlobal: false — store local: solo eso. Avanza al siguiente nodo.
-   *
-   * isGlobal: true — además registra el store en la sesión para que
-   * chat.engine.ts (processGlobalStores → evaluateStoreIntent) intercepte
-   * los mensajes SIGUIENTES (insert/delete/edit/show) sin pasar por el flujo.
+   * Cuando el flujo llega a este nodo, procesa el mensaje que disparó la ruta
+   * y, si isGlobal: true, registra el store con contexto semántico enriquecido
+   * (description, triggerPhrases, avoidPhrases) para que el interceptor global
+   * pueda distinguirlo de otros stores activos simultáneos.
    */
   async runStore(ctx: RunnerContext): Promise<NodeResult> {
     const { data, id: nodeId } = ctx.node;
     const { session }          = ctx;
 
-    const objectVar:         string          = data.objectVar         ?? '';
-    const extractFromNodeId: string          = data.extractFromNodeId ?? '';
-    const isArray:           boolean         = data.isArray           ?? false;
-    const isGlobal:          boolean         = data.isGlobal          ?? false;
+    const objectVar:         string            = data.objectVar         ?? '';
+    const extractFromNodeId: string            = data.extractFromNodeId ?? '';
+    const isArray:           boolean           = data.isArray           ?? false;
+    const isGlobal:          boolean           = data.isGlobal          ?? false;
     const closeNodeId:       string | undefined = data.closeNodeId;
-    const permissions:       StorePermission[] = data.permissions     ?? [];
-    const feedbackVisible:   boolean         = data.feedbackVisible   ?? false;
-    const feedbackMessage:   string          = data.feedbackMessage   ?? '';
+    const permissions:       StorePermission[] = data.permissions       ?? [];
+    const feedbackVisible:   boolean           = data.feedbackVisible   ?? false;
+    const feedbackMessage:   string            = data.feedbackMessage   ?? '';
+
+    // ── Nuevos campos de contexto semántico ───────────────────────────────
+    const description:    string = data.description    ?? '';
+    const triggerPhrases: string = data.triggerPhrases ?? '';
+    const avoidPhrases:   string = data.avoidPhrases   ?? '';
 
     this.logger.log(
       `[storeNode] id="${nodeId}" objectVar="${objectVar}" isGlobal=${isGlobal} ` +
-      `extractFromNodeId="${extractFromNodeId}" isArray=${isArray}`,
+      `extractFromNodeId="${extractFromNodeId}" isArray=${isArray}\n` +
+      `  description    : "${description}"\n` +
+      `  triggerPhrases : "${triggerPhrases}"\n` +
+      `  avoidPhrases   : "${avoidPhrases}"`,
     );
 
     if (!objectVar) {
@@ -404,29 +405,20 @@ private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
     }
 
     // ── Inicializar objectVar en formState si no existe ────────────────────
-    // Para isArray: arranca como []. Para objeto único: arranca como null.
     if (!(objectVar in session.formState)) {
       const initialValue = isArray ? [] : null;
       this.sessionService.mergeFormState(session.sessionId, { [objectVar]: initialValue });
       this.logger.log(`[storeNode] Inicializado formState["${objectVar}"] = ${JSON.stringify(initialValue)}`);
     }
 
-    // ── Procesar el mensaje QUE DISPARÓ esta ruta ──────────────────────────
-    // Tanto en modo local como global, este es el mensaje que el intentNode
-    // ya clasificó como "el usuario quiere algo de este store" — por eso
-    // SIEMPRE se procesa aquí, antes de registrar el store global.
-    //
-    // Si isGlobal: true, los mensajes SIGUIENTES los maneja
-    // processGlobalStores (chat.engine.ts) vía evaluateStoreIntent, que sí
-    // soporta insert/delete/edit/show. Este primer mensaje es el único que
-    // quedaría huérfano si no se procesa aquí.
+    // ── Procesar el mensaje que disparó esta ruta ──────────────────────────
     const message = await this.processStoreExtraction(
       session, ctx.userMessage, objectVar, extractFromNodeId, isArray,
       feedbackVisible, feedbackMessage,
     );
 
     if (isGlobal) {
-      // ── Registrar para interceptar mensajes futuros ──────────────────────
+      // ── Registrar con contexto semántico completo ────────────────────────
       const store: ActiveGlobalStore = {
         nodeId,
         objectVar,
@@ -436,9 +428,15 @@ private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
         feedbackVisible,
         feedbackMessage,
         isArray,
+        description,
+        triggerPhrases,
+        avoidPhrases,
       };
       this.sessionService.registerGlobalStore(session.sessionId, store);
-      this.logger.log(`[storeNode] Global registrado — esperando mensajes futuros`);
+      this.logger.log(
+        `[storeNode] Global registrado — objectVar="${objectVar}" ` +
+        `description="${description}"`,
+      );
     }
 
     return {
@@ -450,10 +448,6 @@ private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
   }
 
   // ── storeNode: extracción + acumulación + feedback ─────────────────────────
-  //
-  // Carga el outputCache de extractFromNodeId, identifica vía LLM qué ítems
-  // menciona el userMessage, y los acumula en formState[objectVar].
-  // Compartido entre modo local y la primera ejecución del modo global.
 
   private async processStoreExtraction(
     session:           ChatSession,
@@ -500,11 +494,6 @@ private async runConfirmation(ctx: RunnerContext): Promise<NodeResult> {
   }
 
   // ── storeNode: extracción LLM de ítems relevantes ──────────────────────────
-  //
-  // Prompt acotado: solo recibe los documentos cacheados (resumidos a sus campos
-  // planos, sin namespacing) y el mensaje del usuario. Identifica qué ítems
-  // de la lista está seleccionando el usuario — por nombre exacto, parcial
-  // o sinónimo evidente.
 
   private async extractRelevantDocs(
     docs: Record<string, any>[],
@@ -556,11 +545,7 @@ Si el usuario no menciona ningún ítem de la lista, devuelve {"selectedIndexes"
     }
   }
 
-  // ── storeNode: resolver feedbackMessage en modo local ──────────────────────
-  //
-  // Si feedbackMessage está vacío → mensaje natural autogenerado, sin sintaxis.
-  // Si el operador escribió algo → se usa tal cual, con placeholders OPCIONALES:
-  // ${item}, ${count}, ${list}, ${form.campo}.
+  // ── storeNode: resolver feedbackMessage ────────────────────────────────────
 
   private resolveStoreFeedback(
     template: string,
@@ -591,11 +576,6 @@ Si el usuario no menciona ningún ítem de la lista, devuelve {"selectedIndexes"
         return val !== null && val !== undefined ? String(val) : `[${key}]`;
       });
   }
-
-  // ── storeNode: mensaje natural autogenerado (sin sintaxis) ─────────────────
-  //
-  // Usado cuando feedbackMessage está vacío. Construye una frase en español
-  // a partir de la acción, los ítems afectados y el total acumulado.
 
   private buildDefaultFeedback(
     action: 'agregado' | 'eliminado' | 'actualizado',

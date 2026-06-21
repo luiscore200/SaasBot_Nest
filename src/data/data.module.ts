@@ -15,12 +15,33 @@ import { WidgetConfigController } from './widge/widgeConfig.controller';
 import { EmbeddingModule } from 'src/embedding/embedding.module';
 import { IndexingModule } from 'src/indexing/indexing.module';
 import { CascadeService } from './cascade.service';
+import { WidgetCorsService } from './widge/widgetCors.service';
+import { AuthModule } from 'src/auth/auth.module';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PrismaModule } from 'src/prisma/prisma.module';
+
+
 
 
 @Module({
-  imports: [MongooseModelsModule,CommonModule,EmbeddingModule,IndexingModule],
+  imports: [
+    MongooseModelsModule,
+    CommonModule,
+    EmbeddingModule,
+    IndexingModule,
+    PrismaModule,
+    ConfigModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret: config.get<string>('JWT_SECRET'),
+      }),
+    }),
+  ],
   exports:[DocumentsService],
   controllers: [SchemasController,DocumentsController, MapflowController, ChatbotController, WidgetConfigController],
-  providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService, WidgetConfigService, CascadeService],
+  providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService, WidgetConfigService, CascadeService, WidgetCorsService],
+
 })
 export class DataModule {}

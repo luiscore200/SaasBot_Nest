@@ -1,41 +1,45 @@
-// ─── create-widgetconfig.dto.ts ───────────────────────────────────────────────
- 
 import {
-  IsString,
-  IsNotEmpty,
-  IsEnum,
-  IsOptional,
-  IsBoolean,
-  Matches,
+  IsString, IsOptional, IsHexColor, IsEnum, IsArray, IsUrl, ArrayUnique,
 } from 'class-validator';
 import { WIDGET_POSITIONS, WidgetPosition } from '../../../mongoose/widgetConfig.schema';
- 
-const HEX_COLOR_REGEX = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
- 
+
 export class CreateWidgetConfigDto {
   @IsString()
-  @IsNotEmpty()
-  botConfigId: string;
- 
+  botConfigId!: string;
+
   @IsString()
-  @IsNotEmpty()
-  displayName: string;
- 
+  displayName!: string;
+
   @IsOptional()
-  @IsString()
+  @IsUrl()
   logoUrl?: string;
- 
-  @IsString()
-  @Matches(HEX_COLOR_REGEX, { message: 'primaryColor debe ser un color hex válido. Ej: #3B82F6' })
-  primaryColor: string;
- 
-  @IsString()
-  @Matches(HEX_COLOR_REGEX, { message: 'secondaryColor debe ser un color hex válido. Ej: #F3F4F6' })
-  secondaryColor: string;
- 
-  @IsEnum(WIDGET_POSITIONS, {
-    message: `position debe ser uno de: ${WIDGET_POSITIONS.join(', ')}`,
-  })
-  position: WidgetPosition;
+
+  @IsOptional()
+  @IsHexColor()
+  primaryColor?: string;
+
+  @IsOptional()
+  @IsHexColor()
+  secondaryColor?: string;
+
+  @IsOptional()
+  @IsEnum(WIDGET_POSITIONS)
+  position?: WidgetPosition;
+
+  /**
+   * Dominios autorizados para usar este widget.
+   * Acepta URLs con o sin path, localhost incluido.
+   * Ejemplos: ['https://mitienda.com', 'http://localhost:5500']
+   */
+  @IsOptional()
+  @IsArray()
+  @IsUrl(
+    {
+      require_tld: false,      // permite localhost (sin TLD)
+      require_protocol: true,  // obliga https:// o http://
+    },
+    { each: true },
+  )
+  @ArrayUnique()
+  allowedOrigins?: string[];
 }
- 

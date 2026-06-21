@@ -1,26 +1,56 @@
 import {
-  Controller,
-  Get,
-  Post,
-  Put,
-  Delete,
-  Patch,
-  Param,
-  Body,
-  Query,
-  HttpCode,
-  HttpStatus,
+  Controller, Get, Post, Put, Delete, Patch,
+  Param, Body, Query, HttpCode, HttpStatus, Res,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { WidgetConfigService } from './widgeConfig.service';
 import { CreateWidgetConfigDto } from './dto/create.dto';
 import { UpdateWidgetConfigDto } from './dto/update.dto';
+import { WIDGET_LOADER_SCRIPT } from './loader';
 
-@Controller('widget-configs')
+@Controller()
 export class WidgetConfigController {
   constructor(private readonly widgetConfigService: WidgetConfigService) {}
 
-  // POST /widget-configs/:companyId
-  @Post(':companyId')
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RUTAS PÚBLICAS OPACAS
+  // Superficie visible: solo el token JWT. Sin companyId, widgetId ni paths internos.
+  // La validación de origin ya ocurrió en CORS antes de llegar aquí.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * GET /widget/v?t=TOKEN
+   * Sirve el loader.js. Valida el token antes de servir
+   * para evitar que URLs manipuladas reciban el script.
+   */
+  @Get('widget/v')
+  serveLoader(
+    @Query('t') token: string,
+    @Res() res: Response,
+  ) {
+    this.widgetConfigService.verifyWidgetToken(token);
+
+    res.setHeader('Content-Type',  'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(200).send(WIDGET_LOADER_SCRIPT);
+  }
+
+  /**
+   * GET /widget/r?t=TOKEN
+   * Devuelve config de UI al loader.js.
+   * Origin ya validado por CORS — aquí solo se verifica el token y se resuelve la config.
+   */
+  @Get('widget/r')
+  resolveWidget(@Query('t') token: string) {
+    return this.widgetConfigService.resolveForWidget(token);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RUTAS CRUD — protegidas por tus guards de autenticación
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Post('widget-configs/:companyId')
   @HttpCode(HttpStatus.CREATED)
   create(
     @Param('companyId') companyId: string,
@@ -29,8 +59,7 @@ export class WidgetConfigController {
     return this.widgetConfigService.create(companyId, dto);
   }
 
-  // GET /widget-configs/:companyId
-  @Get(':companyId')
+  @Get('widget-configs/:companyId')
   findAll(
     @Param('companyId') companyId: string,
     @Query('deleted') deleted?: string,
@@ -38,8 +67,7 @@ export class WidgetConfigController {
     return this.widgetConfigService.findAll(companyId, deleted === 'true');
   }
 
-  // GET /widget-configs/:companyId/:id
-  @Get(':companyId/:id')
+  @Get('widget-configs/:companyId/:id')
   findOne(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
@@ -48,8 +76,7 @@ export class WidgetConfigController {
     return this.widgetConfigService.findById(companyId, id, deleted === 'true');
   }
 
-  // PUT /widget-configs/:companyId/:id
-  @Put(':companyId/:id')
+  @Put('widget-configs/:companyId/:id')
   update(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
@@ -58,8 +85,7 @@ export class WidgetConfigController {
     return this.widgetConfigService.update(companyId, id, dto);
   }
 
-  // PATCH /widget-configs/:companyId/:id/active?value=true|false
-  @Patch(':companyId/:id/active')
+  @Patch('widget-configs/:companyId/:id/active')
   toggleActive(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
@@ -68,8 +94,7 @@ export class WidgetConfigController {
     return this.widgetConfigService.toggleActive(companyId, id, value === 'true');
   }
 
-  // DELETE /widget-configs/:companyId/:id?hard=true
-  @Delete(':companyId/:id')
+  @Delete('widget-configs/:companyId/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   delete(
     @Param('companyId') companyId: string,
@@ -77,18 +102,5 @@ export class WidgetConfigController {
     @Query('hard') hard?: string,
   ) {
     return this.widgetConfigService.delete(companyId, id, hard === 'true');
-  }
-
-  /**
-   * Endpoint público consumido por el script JS del widget al cargarse.
-   * No requiere autenticación de empresa — solo widgetId + companyId.
-   * GET /widget-configs/:companyId/:id/resolve
-   */
-  @Get(':companyId/:id/resolve')
-  resolveForWidget(
-    @Param('companyId') companyId: string,
-    @Param('id') id: string,
-  ) {
-    return this.widgetConfigService.resolveForWidget(id, companyId);
   }
 }

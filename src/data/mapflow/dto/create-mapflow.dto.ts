@@ -306,6 +306,18 @@ export class StoreNodeDataDto {
   @IsOptional()
   @IsString()
   feedbackMessage?: string;
+  
+   @IsOptional()
+   @IsString()
+  description?:string;
+ 
+  @IsOptional()
+  @IsString()
+  triggerPhrases?:string;
+  
+  @IsOptional()
+  @IsString()
+  avoidPhrases?:string;
 
   // ── UI fields — el frontend los persiste para reconstruir el canvas ──
 @IsOptional() @IsString() label?: string;

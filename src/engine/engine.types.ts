@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// chat-engine.types.ts  (v6 — storeNode + activeGlobalStores)
+// chat-engine.types.ts  (v7 — storeNode enriched context)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type LLMRole = 'system' | 'user' | 'assistant';
@@ -74,6 +74,24 @@ export interface StoreNodeData {
   permissions:       StorePermission[];
   feedbackVisible:   boolean;
   feedbackMessage?:  string;
+  /**
+   * Descripción semántica del store en lenguaje natural.
+   * Explica qué representa esta colección en el contexto del negocio.
+   * Ej: "Lista de medicamentos que el cliente quiere pedir HOY"
+   */
+  description:       string;
+  /**
+   * Frases o expresiones típicas del usuario que indican que está
+   * actuando sobre ESTE store (no sobre otro).
+   * Ej: "agrega al pedido, ponlo, quiero ese, inclúyelo"
+   */
+  triggerPhrases:    string;
+  /**
+   * Frases o expresiones que el usuario usaría para un store DIFERENTE,
+   * útiles para evitar falsos positivos cuando hay múltiples stores activos.
+   * Ej: "para después, en favoritos, guardar para luego"
+   */
+  avoidPhrases:      string;
 }
 
 /**
@@ -90,6 +108,25 @@ export interface ActiveGlobalStore {
   feedbackVisible:   boolean;
   feedbackMessage?:  string;
   isArray:           boolean;
+  /** Descripción semántica del store — qué representa en el dominio del negocio */
+  description:       string;
+  /** Ejemplos de frases del usuario que SÍ apuntan a este store */
+  triggerPhrases:    string;
+  /** Ejemplos de frases del usuario que NO apuntan a este store (apuntan a otro) */
+  avoidPhrases:      string;
+}
+
+// ── Resultado de resolución unificada de store ────────────────────────────────
+
+/**
+ * Resultado del método resolveStoreAction — resuelve en una sola LLM call
+ * qué store aplica, qué permiso ejecutar y sobre qué ítem.
+ */
+export interface StoreActionResolution {
+  matched:    boolean;
+  storeNodeId: string | null;
+  permission: StorePermission | null;
+  item:       string;
 }
 
 // ── Configuración del bot en runtime ─────────────────────────────────────────
@@ -110,6 +147,13 @@ export interface BotRuntimeConfig {
 }
 
 // ── Sesión en memoria ─────────────────────────────────────────────────────────
+export interface VisitedNodeEntry {
+  nodeId:  string;
+  type:    NodeType;
+  message: string;   // mensaje final mostrado al usuario en ese paso (puede ser '')
+  turn:    number;   // session.turns en el momento de la visita
+}
+
 
 export interface ChatSession {
   sessionId:     string;
@@ -131,6 +175,7 @@ export interface ChatSession {
    * de estos stores debe manejar la acción antes de continuar el flujo.
    */
   activeGlobalStores: ActiveGlobalStore[];
+  nodeHistory:        VisitedNodeEntry[]; 
   currentNodeId: string;
   turns:         number;
   lastActivity:  number;
@@ -149,7 +194,7 @@ export type NodeType =
   | 'goToNode'
   | 'insertNode'
   | 'apiNode'
-  | 'storeNode'; // ← nuevo
+  | 'storeNode';
 
 export interface RuntimeNode {
   id:        string;

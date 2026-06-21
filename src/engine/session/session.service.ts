@@ -11,6 +11,7 @@ import {
   OutputCache,
   ActiveGlobalStore,
   LLMMessage,
+  VisitedNodeEntry,
 } from '../engine.types';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -209,6 +210,7 @@ export class SessionService {
       formState,
       outputCache:        {},
       activeGlobalStores: [], // ← inicializado vacío
+      nodeHistory:        [],
       currentNodeId:      p.config.startNode,
       turns:              0,
       lastActivity:       Date.now(),
@@ -222,4 +224,20 @@ export class SessionService {
   private buildKey(channelId: string, visitorId: string) { return `${channelId}::${visitorId}`; }
   private isExpired(s: ChatSession) { return Date.now() - s.lastActivity > SESSION_TTL_MS; }
   private touch(s: ChatSession) { s.lastActivity = Date.now(); }
+
+
+    // ── nodeHistory ────────────────────────────────────────────────────────────
+
+  /**
+   * Agrega una entrada a nodeHistory directamente sobre la sesión real en el
+   * Map interno — nunca sobre una copia local. runNodeChain reasigna `session`
+   * dentro de su loop (session = {...session, ...}), así que cualquier mutación
+   * hecha sobre ese objeto local después de la primera reasignación se pierde
+   * silenciosamente si no se escribe aquí.
+   */
+  appendNodeHistory(sessionId: string, entry: VisitedNodeEntry): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.nodeHistory = [...s.nodeHistory, entry].slice(-30);
+  }
 }
