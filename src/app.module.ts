@@ -27,6 +27,8 @@ import { QdrantModule } from './qdrant/qdrant.module';
 import { EngineModule } from './engine/engine.module';
 import { OllamaModule } from './ollama/ollama.module';
 import { GeminiModule } from './gemini/gemini.module';
+import { ImportModule } from './import/import.module';
+import { MulterModule } from './multer/multer.module';
 
 
 
@@ -83,6 +85,14 @@ import { GeminiModule } from './gemini/gemini.module';
     
 
      GeminiModule,
+
+    
+
+     ImportModule,
+
+    
+
+     MulterModule,
 
     
 

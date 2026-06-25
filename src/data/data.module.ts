@@ -39,7 +39,7 @@ import { PrismaModule } from 'src/prisma/prisma.module';
       }),
     }),
   ],
-  exports:[DocumentsService],
+  exports:[DocumentsService,SchemasService],
   controllers: [SchemasController,DocumentsController, MapflowController, ChatbotController, WidgetConfigController],
   providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService, WidgetConfigService, CascadeService, WidgetCorsService],
 

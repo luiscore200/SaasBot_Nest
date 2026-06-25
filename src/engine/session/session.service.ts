@@ -240,4 +240,6 @@ export class SessionService {
     if (!s) return;
     s.nodeHistory = [...s.nodeHistory, entry].slice(-30);
   }
+
+  
 }
