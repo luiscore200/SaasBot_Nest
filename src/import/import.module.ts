@@ -10,10 +10,12 @@ import { GroqModule } from 'src/groq/groq.module';
 import { MulterModule } from 'src/multer/multer.module';
 import { SchemaValidatorService } from './validator.service';
 import { ImportSseService } from './sse.service';
+import { InsertionWorkerService } from './insertionWorker.servise';
+import { CommonModule } from 'src/common/common.module';
 
 @Module({
-  imports: [DataModule, GroqModule, MulterModule],
+  imports: [DataModule, GroqModule, MulterModule,CommonModule],
   controllers: [ImportController],
-  providers: [ImportService, ImportQueueService, FileParserService, SchemaInferenceService, SchemaValidatorService,ImportSseService],
+  providers: [ImportService, ImportQueueService, FileParserService, SchemaInferenceService, SchemaValidatorService,ImportSseService,InsertionWorkerService],
 })
 export class ImportModule {}

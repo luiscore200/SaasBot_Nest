@@ -16,8 +16,8 @@ import {
   DiscardJobResponse,
   ConfirmSchemaOnlyResponse,
   ConfirmSchemaAndDataResponse,
-  ImportSseEvent,
 } from './response.types';
+import type { ImportSseEvent } from './sse.service';
 
 interface UploadedMulterFile {
   fieldname: string;
@@ -39,7 +39,7 @@ export class ImportController {
     private readonly multerService: MulterService,
   ) {}
 
-  // ─── POST /:companyId ─────────────────────────────────────────────────────
+  // ─── POST /:companyId — subir archivo e iniciar Fase A ───────────────────
 
   @Post(':companyId')
   @UseInterceptors(FileInterceptor('file', IMPORT_MULTER_CONFIG))
@@ -79,7 +79,7 @@ export class ImportController {
     }
   }
 
-  // ─── GET /:companyId/progress — SSE ──────────────────────────────────────
+  // ─── GET /:companyId/progress — SSE Fase A ───────────────────────────────
 
   @Sse(':companyId/progress')
   progress(
@@ -91,7 +91,7 @@ export class ImportController {
     );
   }
 
-  // ─── GET /:companyId/job ──────────────────────────────────────────────────
+  // ─── GET /:companyId/job — consultar job activo ──────────────────────────
 
   @Get(':companyId/job')
   getActiveJob(
@@ -100,29 +100,29 @@ export class ImportController {
     return this.importService.getActiveJob(companyId);
   }
 
-  // ─── DELETE /:companyId/job ───────────────────────────────────────────────
+  // ─── DELETE /:companyId/job — descartar job ──────────────────────────────
 
   @Delete(':companyId/job')
   async discardJob(
     @Param('companyId') companyId: string,
   ): Promise<DiscardJobResponse> {
-    const job = this.importService.getActiveJob(companyId);
+    const result = this.importService.getActiveJob(companyId);
 
-    if (!job.active) {
+    if (!result.active) {
       throw new NotFoundException({ message: 'No hay ningún análisis activo para descartar.' });
     }
 
     try {
-      await this.multerService.deleteImportFile(job.job.filePath);
-      this.logger.log(`🗑️  Archivo borrado: ${job.job.filePath}`);
+      await this.multerService.deleteImportFile(result.job.filePath);
+      this.logger.log(`🗑️  Archivo borrado: ${result.job.filePath}`);
     } catch {
-      this.logger.warn(`⚠️  No se pudo borrar el archivo: ${job.job.filePath}`);
+      this.logger.warn(`⚠️  No se pudo borrar el archivo: ${result.job.filePath}`);
     }
 
     return this.importService.discardJob(companyId);
   }
 
-  // ─── POST /:companyId/confirm ─────────────────────────────────────────────
+  // ─── POST /:companyId/confirm — Fase 5 ───────────────────────────────────
 
   @Post(':companyId/confirm')
   async confirm(
@@ -139,9 +139,35 @@ export class ImportController {
       return this.importService.confirmSchemaOnly(companyId);
     }
 
-    // schema_and_data — Fase B pendiente
-    throw new BadRequestException({
-      message: 'La carga de datos (schema_and_data) aún no está implementada.',
-    });
+    return this.importService.confirmSchemaAndData(companyId);
+  }
+
+  
+  // ─── GET /:companyId/jobs/progress — SSE Fase B ──────────────────────────
+
+  @Sse(':companyId/jobs/progress')
+  jobProgress(
+    @Param('companyId') companyId: string,
+  ): Observable<MessageEvent> {
+    // Reutiliza el mismo ReplaySubject — el front abre este stream al confirmar schema_and_data
+    const stream$ = this.importSse.getOrCreate(companyId);
+    return stream$.pipe(
+      map((event: ImportSseEvent) => ({ data: event } as MessageEvent)),
+    );
+  }
+
+  // ─── POST /:companyId/jobs/decision — Fase 7 ─────────────────────────────
+
+  @Post(':companyId/jobs/decision')
+  async decision(
+    @Param('companyId') companyId: string,
+    @Body('action') action: 'accept' | 'reject',
+  ): Promise<{ accepted: boolean }> {
+    if (!action || !['accept', 'reject'].includes(action)) {
+      throw new BadRequestException({
+        message: 'El campo "action" debe ser "accept" o "reject".',
+      });
+    }
+    return this.importService.handleDecision(companyId, action);
   }
 }

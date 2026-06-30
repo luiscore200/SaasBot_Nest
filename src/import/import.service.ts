@@ -9,6 +9,7 @@ import { FileParserService } from './parser.service';
 import { SchemaInferenceService } from './inference.service';
 import { SchemaValidatorService } from './validator.service';
 import { ImportSseService } from './sse.service';
+import { InsertionWorkerService } from './insertionWorker.servise';
 import { ImportJob } from './import.types';
 import { MulterService } from 'src/multer/multer.service';
 import { SchemasService } from 'src/data/schemas/schemas.service';
@@ -19,6 +20,7 @@ import {
   GetActiveJobWithDataResponse,
   DiscardJobResponse,
   ConfirmSchemaOnlyResponse,
+  ConfirmSchemaAndDataResponse,
   ImportJobData,
 } from './response.types';
 
@@ -32,6 +34,7 @@ export class ImportService implements OnModuleInit {
     private readonly schemaInference: SchemaInferenceService,
     private readonly schemaValidator: SchemaValidatorService,
     private readonly importSse: ImportSseService,
+    private readonly insertionWorker: InsertionWorkerService,
     private readonly multerService: MulterService,
     private readonly schemasService: SchemasService,
   ) {}
@@ -85,7 +88,7 @@ export class ImportService implements OnModuleInit {
     return { discarded, message: 'Job descartado correctamente.' };
   }
 
-  // ─── Fase 5 — Confirmación schema_only ───────────────────────────────────
+  // ─── Fase 5a — Confirmación schema_only ──────────────────────────────────
 
   async confirmSchemaOnly(companyId: string): Promise<ConfirmSchemaOnlyResponse> {
     const job = this.importQueue.getJobByCompany(companyId);
@@ -93,7 +96,6 @@ export class ImportService implements OnModuleInit {
     if (!job || job.status !== 'preview_ready') {
       throw new ConflictException('No hay un preview listo para confirmar.');
     }
-
     if (!job.schema || !job.category) {
       throw new ConflictException('El job no tiene schema o categoría — Fase A incompleta.');
     }
@@ -113,6 +115,77 @@ export class ImportService implements OnModuleInit {
     this.importSse.close(companyId);
 
     return { schemaId: created._id.toString() };
+  }
+
+  // ─── Fase 5b — Confirmación schema_and_data ──────────────────────────────
+
+  async confirmSchemaAndData(companyId: string): Promise<ConfirmSchemaAndDataResponse> {
+    const job = this.importQueue.getJobByCompany(companyId);
+
+    if (!job || job.status !== 'preview_ready') {
+      throw new ConflictException('No hay un preview listo para confirmar.');
+    }
+    if (!job.schema || !job.category) {
+      throw new ConflictException('El job no tiene schema o categoría — Fase A incompleta.');
+    }
+
+    const created = await this.schemasService.createSchema(companyId, {
+      company_id: companyId,
+      name: job.name,
+      description: job.description,
+      category: job.category as SchemaCategory,
+      fields: job.schema as any,
+    });
+
+    const schemaId = created._id.toString();
+    this.logger.log(`✅ Schema creado [${schemaId}] — iniciando Fase B`);
+
+    // Arrancar worker async — fire and forget
+    setImmediate(() => {
+      this.insertionWorker.run(job, schemaId).catch((err: any) => {
+        this.logger.error(`❌ Fase B fallida [${job.jobId}]: ${err.message}`);
+        this.importQueue.updateJob(companyId, { status: 'failed', lastError: err.message });
+        this.importSse.emitError(companyId, err.message);
+      });
+    });
+
+    return { schemaId, jobId: job.jobId };
+  }
+
+  // ─── Fase 7 — Decisión de reformulación ──────────────────────────────────
+
+  async handleDecision(
+    companyId: string,
+    action: 'accept' | 'reject',
+  ): Promise<{ accepted: boolean }> {
+    const job = this.importQueue.getJobByCompany(companyId);
+
+    if (!job || job.status !== 'awaiting_decision') {
+      throw new ConflictException('No hay una decisión de reformulación pendiente.');
+    }
+
+    if (action === 'accept') {
+      this.logger.log(`✅ Reformulación aceptada [${job.jobId}] — reiniciando inserción`);
+      setImmediate(() => {
+        this.insertionWorker.restartWithNewSchema(job).catch((err: any) => {
+          this.logger.error(`❌ Reinicio Fase B fallido [${job.jobId}]: ${err.message}`);
+          this.importQueue.updateJob(companyId, { status: 'failed', lastError: err.message });
+          this.importSse.emitError(companyId, err.message);
+        });
+      });
+    } else {
+      this.logger.log(`⏩ Reformulación rechazada [${job.jobId}] — continuando sin cambios`);
+      this.importQueue.updateJob(companyId, { status: 'loading_data' });
+      setImmediate(() => {
+        this.insertionWorker.continueWithCurrentSchema(job).catch((err: any) => {
+          this.logger.error(`❌ Continuación Fase B fallida: ${err.message}`);
+          this.importQueue.updateJob(companyId, { status: 'failed', lastError: err.message });
+          this.importSse.emitError(companyId, err.message);
+        });
+      });
+    }
+
+    return { accepted: action === 'accept' };
   }
 
   // ─── Processor — Fase A ──────────────────────────────────────────────────
@@ -189,26 +262,27 @@ export class ImportService implements OnModuleInit {
     }
   }
 
-  // ─── Helper: ImportJob → ImportJobData (response shape) ──────────────────
+  // ─── Helper: ImportJob → ImportJobData ───────────────────────────────────
 
   private toJobData(job: ImportJob): ImportJobData {
     return {
-      jobId:             job.jobId,
-      companyId:         job.companyId,
-      name:              job.name,
-      description:       job.description,
-      filePath:          job.filePath,
-      originalName:      job.originalName,
-      status:            job.status,
-      schema:            job.schema,
-      category:          job.category,
-      sample:            job.sample,
-      hasHeader:         job.hasHeader,
-      headerConfidence:  job.headerConfidence,
-      warnings:          job.warnings,
-      lastError:         job.lastError,
-      createdAt:         job.createdAt.toISOString(),
-      updatedAt:         job.updatedAt.toISOString(),
+      jobId:            job.jobId,
+      companyId:        job.companyId,
+      name:             job.name,
+      description:      job.description,
+      filePath:         job.filePath,
+      originalName:     job.originalName,
+      status:           job.status,
+      schema:           job.schema,
+      category:         job.category,
+      sample:           job.sample,
+      hasHeader:        job.hasHeader,
+      headerConfidence: job.headerConfidence,
+      warnings:         job.warnings,
+      progreso:         job.progreso,
+      lastError:        job.lastError,
+      createdAt:        job.createdAt.toISOString(),
+      updatedAt:        job.updatedAt.toISOString(),
     };
   }
 }

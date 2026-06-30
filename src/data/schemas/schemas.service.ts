@@ -64,7 +64,7 @@ export class SchemasService {
     const query: any = { company_id: companyId };
     query.deleted = deleted !== undefined ? deleted : false;
 
-    return orm.findAll(query);
+    return (await orm.findAll(query)).reverse();
   }
 
   /**

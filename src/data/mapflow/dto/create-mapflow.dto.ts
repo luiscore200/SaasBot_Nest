@@ -52,6 +52,8 @@ class SchemaInfoDto implements SchemaInfo {
   @IsString() id: string;
   @IsString() name: string;
 
+  
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => SchemaAttributeDto)
@@ -456,6 +458,10 @@ export class CreateMapflowDto {
   @IsArray()
   @IsString({ each: true })
   selectedSchemas: string[];
+
+  @IsOptional()
+   @IsString()
+  description?:string;
 
   @IsArray()
   @ValidateNested({ each: true })

@@ -88,6 +88,9 @@ export class MapflowModel {
   @Prop({ required: true })
   name!: string;
 
+  @Prop({ required: false })
+  description?: string;
+
   @Prop({ type: [Object], default: [] })
   nodes!: FlowNode[];
 

@@ -6,13 +6,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { MongooseModelsModule } from './mongoose/mongoose.module';
+
 import { HttpExceptionFilter } from './common/filters/exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { PrismaModule } from './prisma/prisma.module';
-import { AuthService } from './auth/auth.service';
+
 import { RoleModule } from './role/role.module';
-import { JwtService } from './auth/jwt/jwt.service';
+
 import { AuthModule } from './auth/auth.module';
 import { UserModule } from './user/user.module';
 
@@ -29,6 +29,7 @@ import { OllamaModule } from './ollama/ollama.module';
 import { GeminiModule } from './gemini/gemini.module';
 import { ImportModule } from './import/import.module';
 import { MulterModule } from './multer/multer.module';
+import { MapInferenceModule } from './mapInference/mapInference.module';
 
 
 
@@ -93,6 +94,10 @@ import { MulterModule } from './multer/multer.module';
     
 
      MulterModule,
+
+    
+
+     MapInferenceModule,
 
     
 

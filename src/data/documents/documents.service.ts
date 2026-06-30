@@ -34,6 +34,7 @@ export class DocumentsService {
     companyId: string,
     schemaId: string,
     createDto: any,
+     strict: boolean = true,  
   ) {
     const documents = createDto;
     if (!documents || documents.length === 0) {
@@ -60,7 +61,7 @@ export class DocumentsService {
     this.dtoService.validateDataAgainstSchema(
       documents,
       schema,
-      { isArray: true, strict: true },
+      { isArray: true, strict},
     );
 
     const docModel = await this.persistence.getTenantModel<DocumentModel>(
@@ -113,6 +114,7 @@ export class DocumentsService {
     companyId: string,
     schemaId: string,
     dto: any,
+    
   ) {
     const schemaModel = await this.persistence.getTenantModel<SchemaModel>(
       companyId,
