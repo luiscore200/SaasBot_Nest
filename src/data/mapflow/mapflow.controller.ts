@@ -10,11 +10,16 @@ import {
   Patch,
   HttpCode,
   HttpStatus,
+  UseGuards,
+  Req,
 } from '@nestjs/common';
-import { MapflowService } from './mapflow.service';
+import { Request } from 'express';
+import { MapflowService, RequestUser } from './mapflow.service';
 import { CreateMapflowDto } from './dto/create-mapflow.dto';
 import { UpdateMapflowDto } from './dto/update-mapflow.dto';
+import { JwtGuard } from 'src/auth/jwt/jwt.guard'; // ajusta el path si difiere en tu proyecto
 
+@UseGuards(JwtGuard)
 @Controller('mapflows')
 export class MapflowController {
   constructor(private readonly mapflowService: MapflowService) {}
@@ -24,8 +29,10 @@ export class MapflowController {
   create(
     @Param('companyId') companyId: string,
     @Body() dto: CreateMapflowDto,
+    @Req() req: Request,
   ) {
-    return this.mapflowService.createMapflow(companyId, dto);
+    const user = req['user'] as RequestUser;
+    return this.mapflowService.createMapflow(companyId, dto, user);
   }
 
   @Get(':companyId')
@@ -52,8 +59,10 @@ export class MapflowController {
     @Param('companyId') companyId: string,
     @Param('id') id: string,
     @Body() dto: UpdateMapflowDto,
+    @Req() req: Request,
   ) {
-    return this.mapflowService.updateMapflow(companyId, id, dto);
+    const user = req['user'] as RequestUser;
+    return this.mapflowService.updateMapflow(companyId, id, dto, user);
   }
 
   // PATCH separado para toggle active — semánticamente distinto a un update completo
@@ -71,9 +80,11 @@ export class MapflowController {
   delete(
     @Param('companyId') companyId: string,
     @Param('id') id: string,
-    @Query('hard') hard?: string,
+    @Query('hard') hard: string,
+    @Req() req: Request,
   ) {
-    return this.mapflowService.deleteMapflow(companyId, id, hard === 'true');
+    const user = req['user'] as RequestUser;
+    return this.mapflowService.deleteMapflow(companyId, id, user, hard === 'true');
   }
 
   // Endpoint exclusivo para el engine — separado del CRUD de UI

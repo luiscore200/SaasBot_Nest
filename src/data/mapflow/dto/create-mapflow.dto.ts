@@ -463,6 +463,10 @@ export class CreateMapflowDto {
    @IsString()
   description?:string;
 
+    @IsOptional()
+   @IsString()
+  md?:string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => FormFieldDto)
