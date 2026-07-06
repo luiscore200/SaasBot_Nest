@@ -1,43 +1,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// engine/chat.engine.ts  (v6 — storeNode enriched context + resolveStoreAction)
+// engine/chat.engine.ts  (v8 — outputNode eliminado, store con search+operations)
 // ─────────────────────────────────────────────────────────────────────────────
-import {
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 
-import { ChatbotSchema, ChatbotModel }           from '../mongoose/chatbot.schema';
-import { MapflowModel, MapflowModelSchema }       from '../mongoose/mapflows.schema';
-import { FlowRuntime, FlowRuntimeSchema }         from '../mongoose/runtimes.schema';
+import { ChatbotSchema, ChatbotModel } from '../mongoose/chatbot.schema';
+import { MapflowModel, MapflowModelSchema } from '../mongoose/mapflows.schema';
+import { FlowRuntime, FlowRuntimeSchema } from '../mongoose/runtimes.schema';
 
-import { SessionService }              from './session/session.service';
-import { ContextService }              from './context/context.service';
-import { NodeResult, NodeService }     from './node/node.service';
+import { SessionService } from './session/session.service';
+import { ContextService } from './context/context.service';
+import { NodeResult, NodeService } from './node/node.service';
+import { DataResolverService } from './node/store/dataResolver.service';
+import { performStoreSearch, executeStoreOperation, StoreLike } from './node/store/store.handler';
 
 import {
-  ActiveGlobalStore,
-  BotRuntimeConfig,
-  ChatMessage,
-  ChatRequest,
-  ChatResponse,
-  ChatSession,
-  FormFieldDef,
-  FormState,
-  LLMMessage,
-  NodeType,
-  PaginationEntry,
-  RuntimeNode,
-  ChannelType,
-  StorePermission,
-  StoreActionResolution,
-  VisitedNodeEntry,
+  ActiveGlobalStore, BotRuntimeConfig, ChatMessage, ChatRequest, ChatResponse,
+  ChatSession, FormFieldDef, FormState, LLMMessage, NodeType, PaginationEntry,
+  RuntimeNode, ChannelType, StoreActionResolution, VisitedNodeEntry,
 } from './engine.types';
 
-import { ChatGroqService }     from './groq/chatGroq.service';
-import { PersistenceService }  from 'src/common/services/percistence/persistence.service';
-
-const PAGINATION_KEY = '__pagination';
+import { ChatGroqService } from './groq/chatGroq.service';
+import { PersistenceService } from 'src/common/services/percistence/persistence.service';
 
 @Injectable()
 export class EngineService {
@@ -49,16 +32,12 @@ export class EngineService {
     private readonly NodeService:     NodeService,
     private readonly groq:            ChatGroqService,
     private readonly persistence:     PersistenceService,
+    private readonly dataResolver:    DataResolverService,
   ) {}
 
   // ── Punto de entrada principal ─────────────────────────────────────────────
 
-  async process(
-    companyId:   string,
-    botConfigId: string,
-    request:     ChatRequest,
-    channel:     ChannelType = 'widget',
-  ): Promise<ChatResponse> {
+  async process(companyId: string, botConfigId: string, request: ChatRequest, channel: ChannelType = 'widget'): Promise<ChatResponse> {
     const session = await this.resolveSession(companyId, botConfigId, request, channel);
 
     if (session.turns >= session.config.maxTurns) {
@@ -66,717 +45,359 @@ export class EngineService {
       return this.endResponse(session, '¡Hemos llegado al límite de esta conversación!');
     }
 
-    // ── Intercepción de paginación ────────────────────────────────────────
     if (request.paginateNodeId) {
-      return this.processPagination(session, request.paginateNodeId);
+      return this.processStorePagination(session, request.paginateNodeId);
     }
 
-    // ── Intercepción de stores globales ───────────────────────────────────
-    // Se evalúa ANTES del flujo normal. Una sola LLM call resuelve qué store
-    // aplica, qué permiso ejecutar y sobre qué ítem — sin llamadas secuenciales.
     if (session.activeGlobalStores.length > 0) {
       const storeResponse = await this.processGlobalStores(session, request.message);
       if (storeResponse) return storeResponse;
     }
 
-    // ── Flujo normal ──────────────────────────────────────────────────────
     const result = await this.runNodeChain(session, request.message);
 
-    if (Object.keys(result.data).length > 0) {
-      this.SessionService.mergeFormState(session.sessionId, result.data);
-    }
+    if (Object.keys(result.data).length > 0) this.SessionService.mergeFormState(session.sessionId, result.data);
 
     const nonEmptyTexts = result.chatMessages.map(m => m.text).filter(t => t?.trim());
-    if (nonEmptyTexts.length > 0) {
-      this.SessionService.pushTurn(session.sessionId, request.message, nonEmptyTexts);
-    }
+    if (nonEmptyTexts.length > 0) this.SessionService.pushTurn(session.sessionId, request.message, nonEmptyTexts);
 
     if (result.nextNodeId) {
       this.SessionService.setCurrentNode(session.sessionId, result.nextNodeId);
-      this.checkAndCloseStores(session, result.nextNodeId);
+      this.ensureStoreLifecycle(session, result.nextNodeId);
     }
 
     const conversationDone = result.done && !result.nextNodeId;
-    if (conversationDone) {
-      this.SessionService.destroy(session.sessionId);
-    }
+    if (conversationDone) this.SessionService.destroy(session.sessionId);
 
     const finalMessages = result.chatMessages.filter(m => m.text?.trim());
-
-    if (finalMessages.length === 0 && !conversationDone) {
-      finalMessages.push({ text: 'Procesando tu solicitud...' });
-    }
+    if (finalMessages.length === 0 && !conversationDone) finalMessages.push({ text: 'Procesando tu solicitud...' });
 
     return {
-      message:     finalMessages[finalMessages.length - 1]?.text ?? '',
-      messages:    finalMessages.length > 0 ? finalMessages : [{ text: '' }],
-      sessionId:   session.sessionId,
+      message: finalMessages[finalMessages.length - 1]?.text ?? '',
+      messages: finalMessages.length > 0 ? finalMessages : [{ text: '' }],
+      sessionId: session.sessionId,
       currentNode: result.nextNodeId ?? session.currentNodeId,
-      formState:   session.formState,
-      done:        conversationDone,
+      formState: session.formState,
+      done: conversationDone,
     };
+  }
+
+  // ── Lifecycle de stores flotantes ───────────────────────────────────────────
+
+  private ensureStoreLifecycle(session: ChatSession, nodeId: string): void {
+    const node = session.config.runtimeNodes[nodeId];
+    if (!node) return;
+
+    const initIds: string[] = node.data?.initStores ?? [];
+    const finishIds: string[] = node.data?.finishStores ?? [];
+
+    for (const storeNodeId of initIds) {
+      if (session.activeGlobalStores.some(s => s.nodeId === storeNodeId)) continue;
+      const storeDef = session.config.runtimeNodes[storeNodeId];
+      if (!storeDef || storeDef.type !== 'storeNode') {
+        this.logger.warn(`[storeLifecycle] initStores en "${nodeId}" referencia "${storeNodeId}" inválido`);
+        continue;
+      }
+      this.registerStoreFromNode(session, storeDef);
+    }
+    for (const storeNodeId of finishIds) {
+      this.SessionService.closeGlobalStore(session.sessionId, storeNodeId);
+    }
+  }
+
+  private registerStoreFromNode(session: ChatSession, storeDef: RuntimeNode): void {
+    const d = storeDef.data ?? {};
+    const objectVar: string = d.objectVar ?? '';
+    if (!objectVar) { this.logger.warn(`[storeLifecycle] storeNode="${storeDef.id}" sin objectVar`); return; }
+
+    if (!(objectVar in session.formState)) {
+      this.SessionService.mergeFormState(session.sessionId, { [objectVar]: d.isArray ? [] : null });
+    }
+
+    const store: ActiveGlobalStore = {
+      nodeId: storeDef.id, objectVar, schemas: d.schemas ?? [], isArray: d.isArray ?? false,
+      storePermissions: d.storePermissions ?? { create: false, show: false, delete: false, update: false },
+      search: d.search ?? false, searchOutput: d.searchOutput,
+      feedbackVisible: d.feedbackVisible ?? false, feedbackMessage: d.feedbackMessage,
+      llmDescription: d.llmDescription,
+    };
+    this.SessionService.registerGlobalStore(session.sessionId, store);
   }
 
   // ── Intercepción de stores globales ───────────────────────────────────────
-  //
-  // Diseño mejorado (v6):
-  //
-  // ANTES (v5): N llamadas LLM independientes, una por store activo.
-  //   → Ambigüedad cuando dos stores tienen permisos similares.
-  //   → Primer match en orden de array "gana", sin base semántica.
-  //
-  // AHORA (v6): resolveStoreAction — una sola LLM call que:
-  //   1. Ve todos los stores activos simultáneamente con contexto semántico
-  //      completo (description, triggerPhrases, avoidPhrases, contenido legible).
-  //   2. Decide a cuál store aplica el mensaje del usuario (comparación directa).
-  //   3. Determina permission + item en la misma inferencia.
-  //
-  // Optimización: si solo hay 1 store activo, se llama a evaluateSingleStore
-  // directamente (sin overhead de selección entre múltiples).
 
-private async processGlobalStores(
-    session:     ChatSession,
-    userMessage: string,
-  ): Promise<ChatResponse | null> {
-
+  private async processGlobalStores(session: ChatSession, userMessage: string): Promise<ChatResponse | null> {
     const resolution = session.activeGlobalStores.length === 1
-      ? await this.evaluateSingleStore(session.activeGlobalStores[0], session.formState, userMessage)
-      : await this.resolveStoreAction(session.activeGlobalStores, session.formState, userMessage);
+      ? await this.evaluateSingleStore(session.activeGlobalStores[0], session, userMessage)
+      : await this.resolveStoreAction(session.activeGlobalStores, session, userMessage);
 
     if (!resolution.matched || !resolution.storeNodeId) return null;
-
     const store = session.activeGlobalStores.find(s => s.nodeId === resolution.storeNodeId);
     if (!store) return null;
 
-    this.logger.log(
-      `[globalStore] INTERCEPTADO nodeId="${store.nodeId}" ` +
-      `objectVar="${store.objectVar}" permission="${resolution.permission}" item="${resolution.item}"`,
-    );
+    const messages: ChatMessage[] = [];
 
-    // ── Ejecutar la acción sobre formState ─────────────────────────────
-    const actionResult = this.executeStoreAction(
-      store, resolution.permission!, resolution.item, session.formState, session.sessionId,
-    );
-
-    this.SessionService.mergeFormState(session.sessionId, {
-      [store.objectVar]: actionResult.newValue,
-    });
-
-    // ── Etiquetar en historial ─────────────────────────────────────────
-    const feedbackText = store.feedbackVisible
-      ? this.resolveStoreTemplate(
-          store.feedbackMessage ?? '',
-          resolution.item,
-          resolution.permission!,
-          actionResult.newValue,
-          session.formState,
-        )
-      : '';
-
-    this.SessionService.pushTurn(
-      session.sessionId,
-      userMessage,
-      feedbackText ? [feedbackText] : [],
-      {
-        interceptedBy: store.nodeId,
-        storeAction: {
-          nodeId:     store.nodeId,
-          permission: resolution.permission!,
-          item:       resolution.item,
-          result:     actionResult.success ? 'success' : 'error',
-        },
-      },
-    );
-
-    const messages: ChatMessage[] = feedbackText ? [{ text: feedbackText }] : [];
-
-    // ── Resolver dónde reanudar (en código, sin LLM) y refrescar sesión ────
-    const freshSession  = this.SessionService.get(session.sessionId)!;
-    const resumeAnchor  = this.findResumeAnchorNode(freshSession);
-
-    if (resumeAnchor) {
-      this.SessionService.setCurrentNode(freshSession.sessionId, resumeAnchor.nodeId);
-      this.logger.log(
-        `[globalStore] RESUME → nodeId="${resumeAnchor.nodeId}" (resuelto por código, sin LLM)`,
-      );
-    } else {
-      this.logger.warn(
-        `[globalStore] RESUME — no se encontró nodo-ancla válido en nodeHistory, ` +
-        `se continúa desde currentNodeId="${freshSession.currentNodeId}"`,
-      );
+    // ── Paso 1: búsqueda (list dispara pipeline propio con paginación) ────
+    if (resolution.search.intent === 'list') {
+      return this.processStoreListSearch(session, store, userMessage);
     }
+
+    if (resolution.search.intent === 'query' && resolution.search.query) {
+      const storeLike: StoreLike = { ...store };
+      const searchResult = await performStoreSearch(storeLike, 'query', resolution.search.query, session, this.dataResolver, this.SessionService);
+      this.SessionService.updateStoreLastFound(session.sessionId, store.nodeId, searchResult.docs);
+      if (searchResult.message) messages.push({ text: searchResult.message });
+    }
+
+    // ── Paso 2: operaciones ────────────────────────────────────────────────
+    const freshStore = this.SessionService.get(session.sessionId)!.activeGlobalStores.find(s => s.nodeId === store.nodeId)!;
+
+    for (const op of resolution.operations) {
+      const result = executeStoreOperation(freshStore, op, session, this.SessionService);
+      if (freshStore.feedbackVisible && result.feedbackText) messages.push({ text: result.feedbackText });
+      if (Object.keys(result.formPatch).length) this.SessionService.mergeFormState(session.sessionId, result.formPatch);
+    }
+
+    if (!messages.length) return null;
+
+    this.SessionService.pushTurn(session.sessionId, userMessage, messages.map(m => m.text), { interceptedBy: store.nodeId });
+
+    const freshSession = this.SessionService.get(session.sessionId)!;
+    const resumeAnchor = this.findResumeAnchorNode(freshSession);
+    if (resumeAnchor) this.SessionService.setCurrentNode(freshSession.sessionId, resumeAnchor.nodeId);
 
     const resumeResult = await this.runNodeChain(freshSession, '');
-
-    const freshSession2 = this.SessionService.get(session.sessionId)!;
-
-    const resumeMessage = resumeResult.message?.trim()
-      ? resumeResult.message
-      : resumeAnchor?.message ?? '';
-
-    if (resumeMessage) {
-      messages.push({ text: resumeMessage });
-    }
+    const resumeMessage = resumeResult.message?.trim() ? resumeResult.message : resumeAnchor?.message ?? '';
+    if (resumeMessage) messages.push({ text: resumeMessage });
 
     if (resumeResult.nextNodeId) {
       this.SessionService.setCurrentNode(freshSession.sessionId, resumeResult.nextNodeId);
-      this.checkAndCloseStores(freshSession, resumeResult.nextNodeId);
+      this.ensureStoreLifecycle(freshSession, resumeResult.nextNodeId);
     }
 
     return {
-      message:     messages[messages.length - 1]?.text ?? '',
-      messages:    messages.length > 0 ? messages : [{ text: '' }],
-      sessionId:   freshSession.sessionId,
+      message: messages[messages.length - 1]?.text ?? '',
+      messages: messages.length > 0 ? messages : [{ text: '' }],
+      sessionId: freshSession.sessionId,
       currentNode: resumeResult.nextNodeId ?? freshSession.currentNodeId,
-      formState:   freshSession.formState,
-      done:        false,
+      formState: freshSession.formState,
+      done: false,
     };
   }
 
-  // ── resolveStoreAction — LLM call unificada (2+ stores activos) ───────────
-  //
-  // Una sola inferencia que compara todos los stores simultáneamente y resuelve:
-  //   - storeNodeId: qué store aplica (o null si ninguno)
-  //   - permission:  qué acción quiere el usuario
-  //   - item:        sobre qué ítem actúa
-  //
-  // El prompt incluye por cada store:
-  //   - description:    qué representa en el dominio (contexto semántico real)
-  //   - triggerPhrases: ejemplos few-shot de frases que SÍ aplican
-  //   - avoidPhrases:   ejemplos few-shot de frases que NO aplican (apuntan a otro store)
-  //   - contenido actual legible (nombres, no JSON crudo)
-  //   - permisos disponibles con descripciones en lenguaje natural
+  /** "Muéstrame todo" — list search con paginación, gestionada igual que el
+   *  botón "ver más" del viejo outputNode pero indexado por storeNodeId. */
+  private async processStoreListSearch(session: ChatSession, store: ActiveGlobalStore, userMessage: string): Promise<ChatResponse> {
+    const storeLike: StoreLike = { ...store };
+    const result = await performStoreSearch(storeLike, 'list', '', session, this.dataResolver, this.SessionService);
 
-  private async resolveStoreAction(
-    stores:      ActiveGlobalStore[],
-    formState:   FormState,
-    userMessage: string,
-  ): Promise<StoreActionResolution> {
+    this.SessionService.pushTurn(session.sessionId, userMessage, result.message ? [result.message] : [], { interceptedBy: store.nodeId });
 
-    const permissionDescriptions: Record<StorePermission, string> = {
-      [StorePermission.INSERT]: 'agregar, añadir, incluir o poner un ítem nuevo',
-      [StorePermission.EDIT]:   'modificar, cambiar, editar o actualizar un ítem existente',
-      [StorePermission.DELETE]: 'quitar, eliminar, borrar o remover un ítem',
-      [StorePermission.SHOW]:   'ver, mostrar, listar o consultar los ítems',
+    const messages: ChatMessage[] = result.message ? [{ text: result.message, pagination: result.hasMore ? { nodeId: store.nodeId, hasMore: true, currentPage: result.currentPage ?? 1 } : undefined }] : [];
+
+    return {
+      message: messages[messages.length - 1]?.text ?? '',
+      messages: messages.length ? messages : [{ text: '' }],
+      sessionId: session.sessionId,
+      currentNode: session.currentNodeId,
+      formState: session.formState,
+      done: false,
     };
-
-    const storesSummary = stores.map(store => {
-      const currentValue = formState[store.objectVar];
-
-      // Serializar contenido actual de forma legible (nombres, no JSON crudo)
-      const contentReadable = this.formatStoreContentReadable(currentValue);
-
-      const permissionsText = store.permissions
-        .map(p => `    - "${p}": ${permissionDescriptions[p]}`)
-        .join('\n');
-
-      return [
-        `  nodeId: "${store.nodeId}"`,
-        `  variable: "${store.objectVar}"`,
-        `  descripción: ${store.description || '(sin descripción)'}`,
-        store.triggerPhrases
-          ? `  frases que indican ESTE store: ${store.triggerPhrases}`
-          : null,
-        store.avoidPhrases
-          ? `  frases que indican OTRO store (no este): ${store.avoidPhrases}`
-          : null,
-        `  contenido actual: ${contentReadable}`,
-        `  permisos disponibles:\n${permissionsText}`,
-      ].filter(Boolean).join('\n');
-    }).join('\n\n---\n\n');
-
-    const allPermissions = [...new Set(stores.flatMap(s => s.permissions))];
-
-    const prompt = `Eres un clasificador de intenciones para múltiples listas/colecciones activas.
-
-El usuario escribió: "${userMessage}"
-
-Stores disponibles:
----
-${storesSummary}
----
-
-Tu tarea:
-1. Determina a cuál store se refiere el mensaje del usuario.
-   Usa la descripción, las frases indicadoras y el contenido actual de cada store.
-   Dos stores pueden tener permisos similares — la descripción y las frases son la clave para distinguirlos.
-
-2. Si el mensaje aplica a algún store, determina:
-   - Qué acción quiere el usuario (según los permisos de ESE store)
-   - Sobre qué ítem actúa (extrae el nombre o descripción del ítem del mensaje, o "" para show/list)
-
-3. Si el mensaje NO aplica a ningún store (es una pregunta general, saludo, o tema diferente):
-   - matched: false
-
-Responde ÚNICAMENTE con JSON válido (sin markdown):
-{
-  "matched": true,
-  "storeNodeId": "<nodeId del store seleccionado, o null>",
-  "permission": "${allPermissions.join('" | "')}",
-  "item": "<ítem extraído del mensaje, o vacío>"
-}`;
-
-    try {
-      const result = await this.groq.rawCall<{
-        matched:     boolean;
-        storeNodeId: string | null;
-        permission:  StorePermission | null;
-        item:        string;
-      }>(prompt, userMessage);
-
-      if (!result || typeof result.matched !== 'boolean') {
-        return { matched: false, storeNodeId: null, permission: null, item: '' };
-      }
-
-      this.logger.log(
-        `[resolveStoreAction] matched=${result.matched} ` +
-        `storeNodeId="${result.storeNodeId}" ` +
-        `permission="${result.permission}" item="${result.item}"`,
-      );
-
-      return {
-        matched:     result.matched === true,
-        storeNodeId: result.matched ? (result.storeNodeId ?? null) : null,
-        permission:  result.matched ? (result.permission ?? null) : null,
-        item:        result.item ?? '',
-      };
-    } catch (err: any) {
-      this.logger.error(`[resolveStoreAction] LLM error: ${err.message}`);
-      return { matched: false, storeNodeId: null, permission: null, item: '' };
-    }
   }
 
-  // ── evaluateSingleStore — optimización para 1 solo store activo ───────────
-  //
-  // Cuando solo hay un store activo, no hace falta seleccionarlo — se evalúa
-  // directamente. El prompt es más acotado (sin comparación entre stores).
-  // Equivalente al evaluateStoreIntent original pero con contexto semántico.
+  /** Paginación de un storeNode (flotante o inline) — "ver más" */
+  private async processStorePagination(session: ChatSession, storeNodeId: string): Promise<ChatResponse> {
+    const activeStore = session.activeGlobalStores.find(s => s.nodeId === storeNodeId);
+    const nodeDef = session.config.runtimeNodes[storeNodeId];
 
-  private async evaluateSingleStore(
-    store:       ActiveGlobalStore,
-    formState:   FormState,
-    userMessage: string,
-  ): Promise<StoreActionResolution> {
+    const store: ActiveGlobalStore | null = activeStore ?? (nodeDef?.type === 'storeNode' ? {
+      nodeId: storeNodeId, objectVar: nodeDef.data.objectVar ?? '', schemas: nodeDef.data.schemas ?? [],
+      isArray: nodeDef.data.isArray ?? false, storePermissions: nodeDef.data.storePermissions,
+      search: nodeDef.data.search ?? false, searchOutput: nodeDef.data.searchOutput,
+      feedbackVisible: false,
+    } : null);
 
-    const permissionDescriptions: Record<StorePermission, string> = {
-      [StorePermission.INSERT]: 'agregar, añadir, incluir o poner un ítem nuevo',
-      [StorePermission.EDIT]:   'modificar, cambiar, editar o actualizar un ítem existente',
-      [StorePermission.DELETE]: 'quitar, eliminar, borrar o remover un ítem',
-      [StorePermission.SHOW]:   'ver, mostrar, listar o consultar los ítems',
-    };
-
-    const currentValue    = formState[store.objectVar];
-    const contentReadable = this.formatStoreContentReadable(currentValue);
-
-    const permissionsText = store.permissions
-      .map(p => `- "${p}": ${permissionDescriptions[p]}`)
-      .join('\n');
-
-    const prompt = `Eres un clasificador de intenciones para una lista/colección.
-
-Variable gestionada: "${store.objectVar}"
-${store.description ? `Descripción: ${store.description}` : ''}
-${store.triggerPhrases ? `Frases que indican acción sobre esta lista: ${store.triggerPhrases}` : ''}
-Contenido actual: ${contentReadable}
-
-Permisos disponibles:
-${permissionsText}
-
-Mensaje del usuario: "${userMessage}"
-
-Determina si el mensaje tiene la intención de realizar alguna de las acciones listadas.
-
-Si SÍ:
-- "matched": true
-- "permission": el ID exacto del permiso ("${store.permissions.join('" | "')}")
-- "item": el ítem o descripción sobre el que actúa (o "" si es show/list)
-
-Si NO (pregunta general, saludo, o no relacionado):
-- "matched": false
-- "permission": null
-- "item": ""
-
-Responde ÚNICAMENTE con JSON válido (sin markdown):`;
-
-    try {
-      const result = await this.groq.rawCall<{
-        matched:    boolean;
-        permission: StorePermission | null;
-        item:       string;
-      }>(prompt, userMessage);
-
-      if (!result || typeof result.matched !== 'boolean') {
-        return { matched: false, storeNodeId: null, permission: null, item: '' };
-      }
-
-      this.logger.log(
-        `[evaluateSingleStore] nodeId="${store.nodeId}" matched=${result.matched} ` +
-        `permission="${result.permission}" item="${result.item}"`,
-      );
-
-      return {
-        matched:     result.matched === true,
-        storeNodeId: result.matched ? store.nodeId : null,
-        permission:  result.matched ? (result.permission ?? null) : null,
-        item:        result.item ?? '',
-      };
-    } catch (err: any) {
-      this.logger.error(`[evaluateSingleStore] LLM error: ${err.message}`);
-      return { matched: false, storeNodeId: null, permission: null, item: '' };
-    }
-  }
-
-  // ── formatStoreContentReadable — serialización legible del contenido ───────
-  //
-  // Convierte el valor de formState[objectVar] a texto plano legible para el LLM.
-  // Evita JSON crudo — el LLM razona mejor con "Ibuprofeno, Amoxicilina"
-  // que con [{"nombre":"Ibuprofeno","precio":500,...}].
-
-  private formatStoreContentReadable(value: any): string {
-    if (value === null || value === undefined) return '(vacío)';
-
-    if (Array.isArray(value)) {
-      if (value.length === 0) return '(vacío)';
-      const names = value.map((entry: any) => {
-        const d = entry?.data ?? entry ?? {};
-        return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '');
-      }).filter(Boolean);
-      return names.length > 0 ? names.join(', ') : `${value.length} ítem(s)`;
-    }
-
-    if (typeof value === 'object') {
-      const d = (value as any)?.data ?? value;
-      const name = d.nombre ?? d.name ?? d.label;
-      return name ? String(name) : JSON.stringify(value);
-    }
-
-    return String(value);
-  }
-
-  // ── Ejecutar acción del store sobre formState ──────────────────────────────
-
-  private executeStoreAction(
-    store:      ActiveGlobalStore,
-    permission: StorePermission,
-    item:       string,
-    formState:  FormState,
-    sessionId:  string,
-  ): { newValue: any; success: boolean } {
-    const current = formState[store.objectVar];
-
-    try {
-      switch (permission) {
-        case StorePermission.INSERT: {
-          if (store.isArray) {
-            const arr = Array.isArray(current) ? [...current] : [];
-
-            // Buscar el doc real en outputCache por nombre
-            const sourceDocs = this.SessionService.getOutputCache(
-              sessionId, store.extractFromNodeId,
-            );
-            const itemLower = item.toLowerCase();
-            const matched = sourceDocs.find((doc: any) => {
-              const d = doc?.data ?? doc ?? {};
-              const name = (d.nombre ?? d.name ?? d.label ?? '').toLowerCase();
-              return name.includes(itemLower);
-            });
-
-            arr.push(matched ?? { name: item, addedAt: new Date().toISOString() });
-            return { newValue: arr, success: true };
-          }
-
-          return { newValue: { name: item, addedAt: new Date().toISOString() }, success: true };
-        }
-
-        case StorePermission.DELETE: {
-          if (store.isArray && Array.isArray(current)) {
-            const filtered = current.filter((entry: any) => {
-              const d = entry?.data ?? entry ?? {};
-              const entryName = (
-                d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '')
-              ).toLowerCase();
-              return !entryName.includes(item.toLowerCase());
-            });
-            return { newValue: filtered, success: true };
-          }
-          return { newValue: null, success: true };
-        }
-
-        case StorePermission.EDIT: {
-          if (store.isArray && Array.isArray(current)) {
-            const [targetName, ...rest] = item.split(':');
-            const newItemData           = rest.join(':').trim() || item;
-            const updated = current.map((entry: any) => {
-              const entryName = (entry?.name ?? entry?.label ?? String(entry)).toLowerCase();
-              if (entryName.includes(targetName.toLowerCase())) {
-                return { ...entry, name: newItemData, updatedAt: new Date().toISOString() };
-              }
-              return entry;
-            });
-            return { newValue: updated, success: true };
-          }
-          return {
-            newValue: {
-              ...(typeof current === 'object' ? current : {}),
-              name: item,
-              updatedAt: new Date().toISOString(),
-            },
-            success: true,
-          };
-        }
-
-        case StorePermission.SHOW:
-          return { newValue: current, success: true };
-
-        default:
-          return { newValue: current, success: false };
-      }
-    } catch (err: any) {
-      this.logger.error(`[executeStoreAction] error: ${err.message}`);
-      return { newValue: current, success: false };
-    }
-  }
-
-  // ── Resolver template del feedbackMessage ─────────────────────────────────
-
-  private resolveStoreTemplate(
-    template:   string,
-    item:       string,
-    permission: StorePermission,
-    newValue:   any,
-    formState:  FormState,
-  ): string {
-    if (!template.trim()) {
-      return this.buildDefaultGlobalFeedback(permission, item, newValue);
-    }
-
-    const count   = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
-    const listStr = Array.isArray(newValue)
-      ? newValue.map((e: any) => e?.name ?? e?.label ?? String(e)).join(', ')
-      : '';
-
-    return template
-      .replace(/\$\{item\}/g,       item)
-      .replace(/\$\{permission\}/g,  permission)
-      .replace(/\$\{count\}/g,       String(count))
-      .replace(/\$\{list\}/g,        listStr)
-      .replace(/\$\{form\.(\w+)\}/g, (_, key) => {
-        const val = formState[key];
-        return val !== null && val !== undefined ? String(val) : `[${key}]`;
-      });
-  }
-
-  private buildDefaultGlobalFeedback(
-    permission: StorePermission,
-    item:       string,
-    newValue:   any,
-  ): string {
-    const count  = Array.isArray(newValue) ? newValue.length : (newValue ? 1 : 0);
-    const plural = count === 1 ? 'producto' : 'productos';
-
-    switch (permission) {
-      case StorePermission.INSERT:
-        return `He agregado "${item}" a tu lista. Ahora tienes ${count} ${plural}.`;
-      case StorePermission.DELETE:
-        return `He eliminado "${item}" de tu lista. Te quedan ${count} ${plural}.`;
-      case StorePermission.EDIT:
-        return `He actualizado "${item}".`;
-      case StorePermission.SHOW: {
-        const list = Array.isArray(newValue)
-          ? newValue.map((e: any) => {
-              const d = e?.data ?? e ?? {};
-              return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? '');
-            }).join(', ')
-          : String(newValue ?? '');
-        return list ? `Tu lista contiene: ${list}.` : 'Tu lista está vacía.';
-      }
-      default:
-        return '';
-    }
-  }
-
-  // ── Comprobar y cerrar stores cuyo closeNodeId acaba de alcanzarse ─────────
-
-  private checkAndCloseStores(session: ChatSession, arrivedNodeId: string): void {
-    const toClose = session.activeGlobalStores.filter(
-      st => st.closeNodeId === arrivedNodeId,
-    );
-    for (const store of toClose) {
-      this.SessionService.closeGlobalStore(session.sessionId, store.nodeId);
-      this.logger.log(
-        `[globalStore] AUTO-CLOSE — nodeId="${store.nodeId}" ` +
-        `porque closeNodeId="${arrivedNodeId}" fue alcanzado`,
-      );
-    }
-  }
-
-  // ── Procesamiento de paginación ───────────────────────────────────────────
-
-  private async processPagination(
-    session: ChatSession,
-    nodeId:  string,
-  ): Promise<ChatResponse> {
-    const node = session.config.runtimeNodes[nodeId];
-    if (!node || node.type !== 'outputNode') {
-      this.logger.warn(`[paginate] nodeId="${nodeId}" no es un outputNode válido`);
+    if (!store) {
+      this.logger.warn(`[paginate] storeNodeId="${storeNodeId}" no es un store válido`);
       return this.endResponse(session, 'No se pudo cargar más información.');
     }
 
-    this.SessionService.setCurrentNode(session.sessionId, nodeId);
+    return this.processStoreListSearch(session, store, '[ver más]');
+  }
 
-    const result = await this.runNodeChain(session, '');
+  // ── Clasificación — 2+ stores activos ─────────────────────────────────────
 
-    const nonEmptyTexts = result.chatMessages.map(m => m.text).filter(t => t?.trim());
-    if (nonEmptyTexts.length > 0) {
-      this.SessionService.pushTurn(session.sessionId, '[ver más]', nonEmptyTexts);
+  private async resolveStoreAction(stores: ActiveGlobalStore[], session: ChatSession, userMessage: string): Promise<StoreActionResolution> {
+    const permLabel: Record<string, string> = { create: 'agregar ítems nuevos', show: 'ver/listar el contenido', delete: 'eliminar ítems', update: 'editar ítems existentes' };
+
+    const block = stores.map(s => {
+      const current = this.formatStoreContentReadable(session.formState[s.objectVar]);
+      const perms = Object.entries(s.storePermissions ?? {}).filter(([, v]) => v).map(([k]) => permLabel[k] ?? k).join(', ') || '(ninguno)';
+      return [
+        `[Store nodeId="${s.nodeId}"]`,
+        `  descripción: ${s.llmDescription || '(sin descripción)'}`,
+        `  contenido actual: ${current}`,
+        `  permisos de colección: ${perms}`,
+        `  búsqueda habilitada: ${s.search ? 'sí' : 'no'}`,
+      ].join('\n');
+    }).join('\n\n---\n\n');
+
+    return this.callStoreActionLLM(block, userMessage);
+  }
+
+  private async evaluateSingleStore(store: ActiveGlobalStore, session: ChatSession, userMessage: string): Promise<StoreActionResolution> {
+    const permLabel: Record<string, string> = { create: 'agregar ítems nuevos', show: 'ver/listar el contenido', delete: 'eliminar ítems', update: 'editar ítems existentes' };
+    const current = this.formatStoreContentReadable(session.formState[store.objectVar]);
+    const perms = Object.entries(store.storePermissions ?? {}).filter(([, v]) => v).map(([k]) => permLabel[k] ?? k).join(', ') || '(ninguno)';
+
+    const block = [
+      `[Store nodeId="${store.nodeId}"]`,
+      `  descripción: ${store.llmDescription || '(sin descripción)'}`,
+      `  contenido actual: ${current}`,
+      `  permisos de colección: ${perms}`,
+      `  búsqueda habilitada: ${store.search ? 'sí' : 'no'}`,
+    ].join('\n');
+
+    return this.callStoreActionLLM(block, userMessage);
+  }
+
+  private async callStoreActionLLM(storesBlock: string, userMessage: string): Promise<StoreActionResolution> {
+    const prompt = `Analiza el mensaje del usuario respecto a los siguientes store(s)/colección(es).
+
+Mensaje del usuario: "${userMessage}"
+
+${storesBlock}
+
+Responde en dos partes:
+
+1. search: ¿el usuario quiere CONSULTAR el catálogo? (solo si el store tiene
+   "búsqueda habilitada: sí")
+   - "query": busca un ítem puntual (ej: "¿tienen ibuprofeno?")
+   - "list": quiere ver todo el catálogo (ej: "muéstrame todo")
+   - "none": no hay intención de consulta en este mensaje
+
+2. operations: lista de acciones sobre la colección (según los "permisos de
+   colección" de CADA store). Tipos válidos: "insert", "edit", "delete", "show".
+   - Si una operación usa el resultado de la búsqueda de este mismo mensaje,
+     usa el MISMO texto en "item" que en search.query.
+   - Si el usuario usa una referencia implícita ("agrégalo", "esa",
+     "cámbiala"), deja "item" vacío.
+   - Para "edit"/"delete", "target" es el ítem YA existente en la colección.
+
+3. Si el mensaje no aplica a ningún store (pregunta general, saludo, u otro
+   tema no relacionado a búsqueda ni a la colección): matched: false.
+
+Responde ÚNICAMENTE con JSON (sin markdown):
+{
+  "matched": true,
+  "storeNodeId": "<nodeId o null>",
+  "search": {"intent": "none"|"query"|"list", "query": ""},
+  "operations": [{"type": "insert"|"edit"|"delete"|"show", "target": "", "item": ""}]
+}`;
+
+    try {
+      const result = await this.groq.rawCall<StoreActionResolution>(prompt, userMessage);
+      if (!result || typeof result.matched !== 'boolean') {
+        return { matched: false, storeNodeId: null, search: { intent: 'none', query: '' }, operations: [] };
+      }
+      return {
+        matched: result.matched,
+        storeNodeId: result.matched ? result.storeNodeId : null,
+        search: result.search ?? { intent: 'none', query: '' },
+        operations: Array.isArray(result.operations) ? result.operations : [],
+      };
+    } catch (err: any) {
+      this.logger.error(`[callStoreActionLLM] error: ${err.message}`);
+      return { matched: false, storeNodeId: null, search: { intent: 'none', query: '' }, operations: [] };
     }
+  }
 
-    if (result.nextNodeId) {
-      this.SessionService.setCurrentNode(session.sessionId, result.nextNodeId);
-      this.checkAndCloseStores(session, result.nextNodeId);
+  private formatStoreContentReadable(value: any): string {
+    if (value === null || value === undefined) return '(vacío)';
+    if (Array.isArray(value)) {
+      if (!value.length) return '(vacío)';
+      const names = value.map((e: any) => { const d = e?.data ?? e ?? {}; return d.nombre ?? d.name ?? d.label ?? String(Object.values(d)[0] ?? ''); }).filter(Boolean);
+      return names.length ? names.join(', ') : `${value.length} ítem(s)`;
     }
-
-    const finalMessages = result.chatMessages.filter(m => m.text?.trim());
-    if (finalMessages.length === 0) finalMessages.push({ text: 'Procesando...' });
-
-    return {
-      message:     finalMessages[finalMessages.length - 1].text,
-      messages:    finalMessages,
-      sessionId:   session.sessionId,
-      currentNode: result.nextNodeId ?? nodeId,
-      formState:   session.formState,
-      done:        false,
-    };
+    if (typeof value === 'object') {
+      const d = (value as any)?.data ?? value;
+      return d.nombre ?? d.name ?? d.label ?? JSON.stringify(value);
+    }
+    return String(value);
   }
 
   // ── Nodos que avanzan automáticamente ────────────────────────────────────
 
   private readonly AUTO_ADVANCE_NODES: NodeType[] = [
-    'outputNode', 'goToNode', 'fallbackNode', 'routerNode',
-    'conversationNode', 'insertNode', 'apiNode', 'storeNode',
+    'goToNode', 'fallbackNode', 'routerNode', 'conversationNode', 'insertNode', 'apiNode', 'storeNode',
   ];
+  private readonly RESUME_ANCHOR_TYPES: NodeType[] = ['conversationNode', 'inputNode', 'confirmationNode'];
 
-  // ── Trackeo de nodos ────────────────────────────────────
-
-// ── Trackeo de nodos ────────────────────────────────────
-
-  private readonly RESUME_ANCHOR_TYPES: NodeType[] = [
-    'conversationNode', 'inputNode', 'confirmationNode',
-  ];
-
- private pushNodeHistory(session: ChatSession, nodeId: string, type: NodeType, message: string, turn: number): void {
-    if (!this.RESUME_ANCHOR_TYPES.includes(type)) return;
-    if (!message?.trim()) return;
-
-    const entry: VisitedNodeEntry = { nodeId, type, message: message.trim(), turn };
-    this.SessionService.appendNodeHistory(session.sessionId, entry);
+  private pushNodeHistory(session: ChatSession, nodeId: string, type: NodeType, message: string, turn: number): void {
+    if (!this.RESUME_ANCHOR_TYPES.includes(type) || !message?.trim()) return;
+    this.SessionService.appendNodeHistory(session.sessionId, { nodeId, type, message: message.trim(), turn });
   }
-
-  // ── findResumeAnchorNode — resuelve en código, sin LLM, dónde reanudar ────
-  //
-  // El nodo correcto para reanudar tras una intercepción de store es, en la
-  // inmensa mayoría de los casos, el último nodo-ancla (conversationNode,
-  // inputNode o confirmationNode) que quedó esperando algo del usuario antes
-  // de que el store interceptara. No hace falta inferencia para esto — el
-  // propio nodeHistory, en orden cronológico, ya contiene la respuesta.
-  //
-  // Se valida además que el nodeId siga existiendo en runtimeNodes y que su
-  // tipo actual siga siendo uno de los aptos para resume (por si el flow fue
-  // editado entre sesiones).
 
   private findResumeAnchorNode(session: ChatSession): { nodeId: string; message: string } | null {
     for (let i = session.nodeHistory.length - 1; i >= 0; i--) {
       const entry = session.nodeHistory[i];
       if (!this.RESUME_ANCHOR_TYPES.includes(entry.type) || !entry.message) continue;
-
       const node = session.config.runtimeNodes[entry.nodeId];
       if (!node || !this.RESUME_ANCHOR_TYPES.includes(node.type as NodeType)) continue;
-
       return { nodeId: entry.nodeId, message: entry.message };
     }
     return null;
   }
+
   // ── Chain de nodos ────────────────────────────────────────────────────────
 
-  private async runNodeChain(
-    session:     ChatSession,
-    userMessage: string,
-  ): Promise<NodeResult & { data: FormState; chatMessages: ChatMessage[]; lastNodeId: string }> {
+  private async runNodeChain(session: ChatSession, userMessage: string): Promise<NodeResult & { data: FormState; chatMessages: ChatMessage[]; lastNodeId: string }> {
     let node = await this.resolveCurrentNode(session);
+    this.ensureStoreLifecycle(session, node.id);
+
     let contextMessages = this.ContextService.build(session, node);
     let lastNodeId = node.id;
 
-    if (node.type !== 'intentNode') {
-      session.formState['__previousNodeId'] = session.currentNodeId;
-    }
+    if (node.type !== 'intentNode') session.formState['__previousNodeId'] = session.currentNodeId;
 
-    let result = await this.NodeService.run({
-      session, node, userMessage, contextMessages,
-    });
-
-    if (Object.keys(result.data).length > 0) {
-      this.SessionService.mergeFormState(session.sessionId, result.data);
-    }
+    let result = await this.NodeService.run({ session, node, userMessage, contextMessages });
+    if (Object.keys(result.data).length > 0) this.SessionService.mergeFormState(session.sessionId, result.data);
 
     const chatMessages: ChatMessage[] = [];
     if (result.message.trim()) {
       chatMessages.push(this.buildChatMessage(result, node));
-      this.pushNodeHistory(session, node.id, node.type as NodeType, result.message, session.turns); // ← nuevo
-
+      this.pushNodeHistory(session, node.id, node.type as NodeType, result.message, session.turns);
     }
 
     const MAX_CHAIN = 5;
-    let chainCount  = 0;
+    let chainCount = 0;
 
     while (result.done && result.nextNodeId && chainCount < MAX_CHAIN) {
       const nextNode = session.config.runtimeNodes[result.nextNodeId];
       if (!nextNode) break;
 
-      this.checkAndCloseStores(session, result.nextNodeId);
+      this.ensureStoreLifecycle(session, result.nextNodeId);
 
-      const isImplicitInput =
-        nextNode.type === 'inputNode' && nextNode.data?.implicit === true;
+      const isImplicitInput = nextNode.type === 'inputNode' && nextNode.data?.implicit === true;
+      const isAutoConfirmation = nextNode.type === 'confirmationNode' && chatMessages.filter(m => m.text?.trim()).length === 0;
 
-      const isAutoConfirmation =
-        nextNode.type === 'confirmationNode' &&
-        chatMessages.filter(m => m.text?.trim()).length === 0;
-
-      if (
-        !this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) &&
-        !isImplicitInput &&
-        !isAutoConfirmation
-      ) {
-        break;
-      }
-
+      if (!this.AUTO_ADVANCE_NODES.includes(nextNode.type as NodeType) && !isImplicitInput && !isAutoConfirmation) break;
       if (this.shouldBlockConversationNode(nextNode)) break;
 
-      session = {
-        ...session,
-        currentNodeId: result.nextNodeId,
-        formState: this.SessionService.get(session.sessionId)?.formState ?? session.formState,
-      };
+      session = { ...session, currentNodeId: result.nextNodeId, formState: this.SessionService.get(session.sessionId)?.formState ?? session.formState };
 
-      node            = nextNode;
-      lastNodeId      = node.id;
+      node = nextNode;
+      lastNodeId = node.id;
       contextMessages = this.ContextService.build(session, node);
 
-      if (node.type !== 'intentNode') {
-        session.formState['__previousNodeId'] = session.currentNodeId;
-      }
+      if (node.type !== 'intentNode') session.formState['__previousNodeId'] = session.currentNodeId;
 
-      const nextResult = await this.NodeService.run({
-        session, node, userMessage, contextMessages,
-      });
-
-      if (Object.keys(nextResult.data).length > 0) {
-        this.SessionService.mergeFormState(session.sessionId, nextResult.data);
-      }
+      const nextResult = await this.NodeService.run({ session, node, userMessage, contextMessages });
+      if (Object.keys(nextResult.data).length > 0) this.SessionService.mergeFormState(session.sessionId, nextResult.data);
 
       if (nextResult.message.trim()) {
         chatMessages.push(this.buildChatMessage(nextResult, node));
-          this.pushNodeHistory(session, node.id, node.type as NodeType, nextResult.message, session.turns); // ← nuevo
-
+        this.pushNodeHistory(session, node.id, node.type as NodeType, nextResult.message, session.turns);
       }
 
       result = nextResult;
@@ -785,24 +406,12 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
 
     this.SessionService.setCurrentNode(session.sessionId, lastNodeId);
 
-    return {
-      ...result,
-      message:      chatMessages[chatMessages.length - 1]?.text ?? '',
-      chatMessages,
-      data:         session.formState,
-      lastNodeId,
-    };
+    return { ...result, message: chatMessages[chatMessages.length - 1]?.text ?? '', chatMessages, data: session.formState, lastNodeId };
   }
 
-  private buildChatMessage(
-    result: NodeResult & { pagination?: PaginationEntry },
-    node:   RuntimeNode,
-  ): ChatMessage {
+  private buildChatMessage(result: NodeResult, node: RuntimeNode): ChatMessage {
     const msg: ChatMessage = { text: result.message.trim() };
-    const pagination = (result as any).pagination as PaginationEntry | undefined;
-    if (node.type === 'outputNode' && pagination?.hasMore) {
-      msg.pagination = pagination;
-    }
+    if (node.type === 'storeNode' && result.pagination?.hasMore) msg.pagination = result.pagination;
     return msg;
   }
 
@@ -811,132 +420,47 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):`;
     return (node.data?.type as string | undefined) === 'question';
   }
 
-  // ── Resolución de sesión ──────────────────────────────────────────────────
+  // ── Resolución de sesión / config (sin cambios respecto a v7) ─────────────
 
-  private async resolveSession(
-    companyId:   string,
-    botConfigId: string,
-    request:     ChatRequest,
-    channel:     ChannelType,
-  ): Promise<ChatSession> {
+  private async resolveSession(companyId: string, botConfigId: string, request: ChatRequest, channel: ChannelType): Promise<ChatSession> {
     if (request.sessionId) {
       const existing = this.SessionService.get(request.sessionId);
       if (existing) return existing;
     }
-
     const config = await this.loadBotConfig(companyId, botConfigId);
-
-    return this.SessionService.getOrCreate({
-      visitorId: request.visitorId,
-      channelId: botConfigId,
-      channel,
-      config,
-      sessionId: request.sessionId,
-    });
+    return this.SessionService.getOrCreate({ visitorId: request.visitorId, channelId: botConfigId, channel, config, sessionId: request.sessionId });
   }
-
-  // ── Carga de configuración desde Mongo ────────────────────────────────────
 
   private async loadBotConfig(companyId: string, botConfigId: string): Promise<BotRuntimeConfig> {
-    const botModel = await this.persistence.getTenantModel<ChatbotModel>(
-      companyId, 'BotConfig', ChatbotSchema,
-    );
-    const bot = await botModel
-      .findById(botConfigId)
-      .lean<ChatbotModel & { _id: any }>()
-      .exec();
+    const botModel = await this.persistence.getTenantModel<ChatbotModel>(companyId, 'BotConfig', ChatbotSchema);
+    const bot = await botModel.findById(botConfigId).lean<ChatbotModel & { _id: any }>().exec();
+    if (!bot || bot.deleted || !bot.active) throw new NotFoundException({ message: 'Bot no encontrado o inactivo.', details: `botConfigId: ${botConfigId}` });
 
-    if (!bot || bot.deleted || !bot.active) {
-      throw new NotFoundException({
-        message: 'Bot no encontrado o inactivo.',
-        details: `botConfigId: ${botConfigId}`,
-      });
-    }
+    const mapFlowModel = await this.persistence.getTenantModel<MapflowModel>(companyId, 'Mapflow', MapflowModelSchema);
+    const mapflow = await mapFlowModel.findById(bot.mapflowId.toString()).lean<MapflowModel & { _id: any }>().exec();
+    if (!mapflow || mapflow.deleted || !mapflow.active) throw new NotFoundException({ message: 'Mapflow del bot no encontrado o inactivo.', details: `mapflowId: ${bot.mapflowId}` });
 
-    const mapFlowModel = await this.persistence.getTenantModel<MapflowModel>(
-      companyId, 'Mapflow', MapflowModelSchema,
-    );
-    const mapflow = await mapFlowModel
-      .findById(bot.mapflowId.toString())
-      .lean<MapflowModel & { _id: any }>()
-      .exec();
+    const runtimeModel = await this.persistence.getTenantModel<FlowRuntime>(companyId, 'FlowRuntime', FlowRuntimeSchema);
+    const flowRuntime = await runtimeModel.findOne({ flowDefinitionId: bot.mapflowId.toString(), active: true }).sort({ version: -1 }).lean<FlowRuntime & { _id: any }>().exec();
+    if (!flowRuntime) throw new NotFoundException({ message: 'FlowRuntime no encontrado para este mapflow.', details: `mapflowId: ${bot.mapflowId}` });
 
-    if (!mapflow || mapflow.deleted || !mapflow.active) {
-      throw new NotFoundException({
-        message: 'Mapflow del bot no encontrado o inactivo.',
-        details: `mapflowId: ${bot.mapflowId}`,
-      });
-    }
+    const formFields: FormFieldDef[] = (mapflow.formFields ?? []).map((f: any) => ({ name: f.name, type: f.type, label: f.label ?? f.name, required: f.required ?? false }));
 
-    const runtimeModel = await this.persistence.getTenantModel<FlowRuntime>(
-      companyId, 'FlowRuntime', FlowRuntimeSchema,
-    );
-    const flowRuntime = await runtimeModel
-      .findOne({ flowDefinitionId: bot.mapflowId.toString(), active: true })
-      .sort({ version: -1 })
-      .lean<FlowRuntime & { _id: any }>()
-      .exec();
-
-    if (!flowRuntime) {
-      throw new NotFoundException({
-        message: 'FlowRuntime no encontrado para este mapflow.',
-        details: `mapflowId: ${bot.mapflowId}`,
-      });
-    }
-
-    const formFields: FormFieldDef[] = (mapflow.formFields ?? []).map((f: any) => ({
-      name:     f.name,
-      type:     f.type,
-      label:    f.label ?? f.name,
-      required: f.required ?? false,
-    }));
-
-    const config: BotRuntimeConfig = {
-      botConfigId:     String(bot._id),
-      company_id:      bot.company_id,
-      name:            bot.name,
-      description:     bot.description,
-      instructions:    bot.instructions,
-      type:            bot.type,
-      maxTurns:        bot.maxTurns,
-      selectedSchemas: bot.selectedSchemas ?? [],
-      mapflowId:       String(bot.mapflowId),
-      formFields,
-      startNode:       flowRuntime.startNode,
-      runtimeNodes:    flowRuntime.nodes as Record<string, RuntimeNode>,
+    return {
+      botConfigId: String(bot._id), company_id: bot.company_id, name: bot.name, description: bot.description,
+      instructions: bot.instructions, type: bot.type, maxTurns: bot.maxTurns, selectedSchemas: bot.selectedSchemas ?? [],
+      mapflowId: String(bot.mapflowId), formFields, startNode: flowRuntime.startNode,
+      runtimeNodes: flowRuntime.nodes as Record<string, RuntimeNode>,
     };
-
-    this.logger.log(
-      `Config cargada — bot="${bot.name}" mapflow="${mapflow.name}" startNode="${flowRuntime.startNode}"`,
-    );
-
-    return config;
   }
-
-  // ── Resolución de nodo actual ─────────────────────────────────────────────
 
   private async resolveCurrentNode(session: ChatSession): Promise<RuntimeNode> {
     const node = session.config.runtimeNodes[session.currentNodeId];
-    if (!node) {
-      throw new NotFoundException({
-        message: 'Nodo no encontrado en el FlowRuntime.',
-        details: `nodeId: ${session.currentNodeId}`,
-      });
-    }
+    if (!node) throw new NotFoundException({ message: 'Nodo no encontrado en el FlowRuntime.', details: `nodeId: ${session.currentNodeId}` });
     return node;
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
   private endResponse(session: ChatSession, text: string): ChatResponse {
-    return {
-      message:     text,
-      messages:    [{ text }],
-      sessionId:   session.sessionId,
-      currentNode: session.currentNodeId,
-      formState:   session.formState,
-      done:        true,
-    };
+    return { message: text, messages: [{ text }], sessionId: session.sessionId, currentNode: session.currentNodeId, formState: session.formState, done: true };
   }
-  
 }

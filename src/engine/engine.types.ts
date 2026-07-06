@@ -1,5 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// chat-engine.types.ts  (v7 — storeNode enriched context)
+// chat-engine.types.ts  (v9 — outputNode eliminado, absorbido por storeNode
+// en modo dual: flotante (listener global) o inline (nodo de flujo con
+// next/branches, comportamiento equivalente al viejo outputNode))
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type LLMRole = 'system' | 'user' | 'assistant';
@@ -7,25 +9,16 @@ export type LLMRole = 'system' | 'user' | 'assistant';
 export interface LLMMessage {
   role: LLMRole;
   content: string;
-  /**
-   * Presente cuando el mensaje fue interceptado por un storeNode global.
-   * El intentNode recibe el historial con el contenido reencuadrado;
-   * el bot general sigue viendo el contenido original.
-   */
   interceptedBy?: string;
   storeAction?: {
     nodeId:     string;
-    permission: StorePermission;
+    type:       StoreOperationType;
     item:       string;
-    result:     'success' | 'error';
+    result:     'success' | 'error' | 'not_found';
   };
 }
 
-// ── Canal de entrada ──────────────────────────────────────────────────────────
-
 export type ChannelType = 'widget' | 'whatsapp';
-
-// ── Formulario del mapflow ────────────────────────────────────────────────────
 
 export interface FormFieldDef {
   name: string;
@@ -36,97 +29,109 @@ export interface FormFieldDef {
 
 export type FormState = Record<string, string | number | boolean | null | Record<string, number> | any[]>;
 
-// ── Paginación múltiple ───────────────────────────────────────────────────────
-
 export interface PaginationEntry {
   nodeId: string;
   hasMore: boolean;
   currentPage: number;
 }
 
-// ── Mensaje tipado ────────────────────────────────────────────────────────────
-
 export interface ChatMessage {
   text: string;
   pagination?: PaginationEntry;
 }
 
-// ── Caché de documentos por outputNode ───────────────────────────────────────
-
+// ── Caché — unificado por schemaId, acumulativo, deduplicado ─────────────────
 export type OutputCache = Record<string, Record<string, any>[]>;
 
-// ── StoreNode — permisos y datos ──────────────────────────────────────────────
+// ── StoreNode ──────────────────────────────────────────────────────────────
 
-export enum StorePermission {
-  INSERT = 'insert',
-  EDIT   = 'edit',
-  DELETE = 'delete',
-  SHOW   = 'show',
+export interface StorePermissions {
+  create: boolean;
+  show:   boolean;
+  delete: boolean;
+  update: boolean;
+}
+
+export interface GlobalCriteria {
+  scheme: string;
+  column: string;
+  condition: string;
+  value: string;
+  valueSource: 'form' | 'static';
+}
+
+export interface StoreSearchOutput {
+  /** Si el resultado de la búsqueda se le muestra al usuario, o solo se usa
+   *  internamente para resolver operaciones (insert/edit implícitos). */
+  searchFeedback: boolean;
+  /** Template determinístico para search.intent === 'list' (paginado) */
+  templateList?: string;
+  /** Template determinístico para search.intent === 'query' (ítem puntual) */
+  templateObj?: string;
+  emptyFallbackEnabled?: boolean;
+  emptyFallbackMessage?: string;
+  pageSize?: number;
+  globalCriteria?: GlobalCriteria[];
+}
+
+export type StoreOperationType = 'insert' | 'edit' | 'delete' | 'show';
+
+export interface StoreOperation {
+  type: StoreOperationType;
+  /** Ítem YA existente en la colección sobre el que se actúa (edit/delete) */
+  target?: string;
+  /** Ítem/valor a usar (insert/edit). Vacío → se resuelve contra lastFound */
+  item?: string;
 }
 
 export interface StoreNodeData {
-  nodeId:            string;
-  objectVar:         string;
-  extractFromNodeId: string;
-  isArray:           boolean;
-  isGlobal:          boolean;
-  closeNodeId?:      string;
-  permissions:       StorePermission[];
-  feedbackVisible:   boolean;
-  feedbackMessage?:  string;
-  /**
-   * Descripción semántica del store en lenguaje natural.
-   * Explica qué representa esta colección en el contexto del negocio.
-   * Ej: "Lista de medicamentos que el cliente quiere pedir HOY"
-   */
-  description:       string;
-  /**
-   * Frases o expresiones típicas del usuario que indican que está
-   * actuando sobre ESTE store (no sobre otro).
-   * Ej: "agrega al pedido, ponlo, quiero ese, inclúyelo"
-   */
-  triggerPhrases:    string;
-  /**
-   * Frases o expresiones que el usuario usaría para un store DIFERENTE,
-   * útiles para evitar falsos positivos cuando hay múltiples stores activos.
-   * Ej: "para después, en favoritos, guardar para luego"
-   */
-  avoidPhrases:      string;
+  nodeId: string;
+  objectVar: string;
+  schemas: string[];
+  isArray: boolean;
+  storePermissions: StorePermissions;
+  search: boolean;
+  searchOutput?: StoreSearchOutput;
+  feedbackVisible: boolean;
+  feedbackMessage?: string;
+  llmDescription?: string;
+  configHash?: string;
+  operatorNotes?: string;
 }
 
 /**
- * Entrada en session.activeGlobalStores.
- * Se registra cuando el flujo pasa por un storeNode con isGlobal: true.
- * Se elimina cuando el flujo alcanza closeNodeId. objectVar permanece en formState.
+ * Entrada en session.activeGlobalStores — solo para stores en modo flotante.
+ * Un storeNode inline (con next/branches) NUNCA se registra aquí; se ejecuta
+ * como cualquier otro nodo del chain, vía NodeService.
  */
 export interface ActiveGlobalStore {
-  nodeId:            string;
-  objectVar:         string;
-  permissions:       StorePermission[];
-  extractFromNodeId: string;
-  closeNodeId?:      string;
-  feedbackVisible:   boolean;
-  feedbackMessage?:  string;
-  isArray:           boolean;
-  /** Descripción semántica del store — qué representa en el dominio del negocio */
-  description:       string;
-  /** Ejemplos de frases del usuario que SÍ apuntan a este store */
-  triggerPhrases:    string;
-  /** Ejemplos de frases del usuario que NO apuntan a este store (apuntan a otro) */
-  avoidPhrases:      string;
+  nodeId: string;
+  objectVar: string;
+  schemas: string[];
+  isArray: boolean;
+  storePermissions: StorePermissions;
+  search: boolean;
+  searchOutput?: StoreSearchOutput;
+  feedbackVisible: boolean;
+  feedbackMessage?: string;
+  llmDescription?: string;
+  /** Últimos docs encontrados por este store — resuelve referencias
+   *  implícitas ("agrégalo", "cámbialo por esa") en turnos siguientes. */
+  lastFound?: Record<string, any>[];
 }
 
-// ── Resultado de resolución unificada de store ────────────────────────────────
+// ── Resolución de intercepción ────────────────────────────────────────────
 
-/**
- * Resultado del método resolveStoreAction — resuelve en una sola LLM call
- * qué store aplica, qué permiso ejecutar y sobre qué ítem.
- */
+export interface StoreSearchIntent {
+  intent: 'none' | 'query' | 'list';
+  query: string;
+}
+
 export interface StoreActionResolution {
-  matched:    boolean;
+  matched: boolean;
   storeNodeId: string | null;
-  permission: StorePermission | null;
-  item:       string;
+  search: StoreSearchIntent;
+  operations: StoreOperation[];
 }
 
 // ── Configuración del bot en runtime ─────────────────────────────────────────
@@ -146,14 +151,12 @@ export interface BotRuntimeConfig {
   runtimeNodes:    Record<string, RuntimeNode>;
 }
 
-// ── Sesión en memoria ─────────────────────────────────────────────────────────
 export interface VisitedNodeEntry {
   nodeId:  string;
   type:    NodeType;
-  message: string;   // mensaje final mostrado al usuario en ese paso (puede ser '')
-  turn:    number;   // session.turns en el momento de la visita
+  message: string;
+  turn:    number;
 }
-
 
 export interface ChatSession {
   sessionId:     string;
@@ -164,30 +167,21 @@ export interface ChatSession {
   config:        BotRuntimeConfig;
   history:       LLMMessage[];
   formState:     FormState;
-  /**
-   * Caché de documentos crudos por outputNode.
-   * Solo outputNodes en modo list escriben aquí.
-   */
   outputCache:   OutputCache;
-  /**
-   * Stores globales activos en esta sesión.
-   * El engine intercepta cada mensaje entrante y evalúa si alguno
-   * de estos stores debe manejar la acción antes de continuar el flujo.
-   */
   activeGlobalStores: ActiveGlobalStore[];
-  nodeHistory:        VisitedNodeEntry[]; 
+  nodeHistory:        VisitedNodeEntry[];
   currentNodeId: string;
   turns:         number;
   lastActivity:  number;
 }
 
 // ── Nodos del runtime ─────────────────────────────────────────────────────────
+// outputNode ELIMINADO — su comportamiento vive ahora en storeNode (inline).
 
 export type NodeType =
   | 'conversationNode'
   | 'intentNode'
   | 'inputNode'
-  | 'outputNode'
   | 'fallbackNode'
   | 'routerNode'
   | 'confirmationNode'
@@ -196,6 +190,14 @@ export type NodeType =
   | 'apiNode'
   | 'storeNode';
 
+/**
+ * data flexible a propósito. Cualquier nodo (excepto storeNode) puede llevar:
+ *   initStores?:   string[]
+ *   finishStores?: string[]
+ * Un storeNode con `next`/`branches` poblado corre INLINE dentro de la cadena
+ * (NodeService.dispatch); un storeNode sin next/branches es FLOTANTE y solo
+ * se activa vía initStores/finishStores de otros nodos.
+ */
 export interface RuntimeNode {
   id:        string;
   type:      NodeType;
@@ -205,8 +207,6 @@ export interface RuntimeNode {
   fallback?: string;
 }
 
-// ── Respuesta estructurada del LLM ────────────────────────────────────────────
-
 export interface LLMStructuredResponse {
   message: string;
   data:    FormState;
@@ -214,12 +214,10 @@ export interface LLMStructuredResponse {
   done:    boolean;
 }
 
-// ── Request / Response del controller ────────────────────────────────────────
-
 export interface ChatRequest {
-  message:        string;
-  sessionId?:     string;
-  visitorId:      string;
+  message:         string;
+  sessionId?:      string;
+  visitorId:       string;
   paginateNodeId?: string;
 }
 
@@ -230,4 +228,4 @@ export interface ChatResponse {
   currentNode: string;
   formState:   FormState;
   done:        boolean;
-}
+} 

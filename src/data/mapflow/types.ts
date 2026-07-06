@@ -1,21 +1,18 @@
-
-
 // ─────────────────────────────────────────────────────────────────────────────
-// NodeType
+// types.ts  (v3 — outputNode eliminado, storeNode con search/searchOutput)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type NodeType =
   | "conversationNode"
   | "intentNode"
   | "inputNode"
-  | "outputNode"
   | "fallbackNode"
   | "routerNode"
   | "confirmationNode"
   | "goToNode"
-  | "insertNode"  // ← nuevo
-  | "apiNode"    // ← nuevo
-  | "storeNode"
+  | "insertNode"
+  | "apiNode"
+  | "storeNode";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Primitivos compartidos
@@ -32,11 +29,25 @@ export interface SchemaInfo {
   attributes: Array<{ id: string; name: string; type: string }>;
 }
 
+export interface GlobalCriteria {
+  scheme: string;
+  column: string;
+  condition: string;
+  value: string;
+  valueSource: "form" | "static";
+}
+
+/** Se mezcla en cualquier *NodeData que NO sea storeNode. */
+export interface StoreLifecycleHooks {
+  initStores?: string[];
+  finishStores?: string[];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ConversationNodeData
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface ConversationNodeData {
+export interface ConversationNodeData extends StoreLifecycleHooks {
   label: string;
   type: "start" | "message" | "question" | "condition" | "end";
   mode?: "template" | "ia";
@@ -48,7 +59,7 @@ export interface ConversationNodeData {
 // InputNodeData
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface InputNodeData {
+export interface InputNodeData extends StoreLifecycleHooks {
   label: string;
   fieldName: string;
   fieldType: "text" | "number" | "date" | "select";
@@ -56,47 +67,14 @@ export interface InputNodeData {
   options?: string[];
   implicit?: boolean;
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FallbackNodeData
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface FallbackNodeData {
+export interface FallbackNodeData extends StoreLifecycleHooks {
   label: string;
   message: string;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OutputNodeData
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface SchemeObject {
-  id: string;
-  selectedSchema: string;
-  selectedFields: string[];
-  schemaName: string; // ← nuevo: nombre visual del schema (ej: "inventario_farmaceutico")
-}
-
-export interface GlobalCriteria {
-  scheme: string;
-  column: string;
-  condition: string;
-  value: string;
-  valueSource: "form" | "static";
-}
-
-export type TemplateMode = "message" | "list" | "raw";
-
-export interface OutputNodeData {
-  label: string;
-  schemes: SchemeObject[];
-  globalCriteria: GlobalCriteria[];
-  outputTemplate?: string;
-  outputVisible?: boolean;
-  templateMode: TemplateMode;
-  emptyFallbackEnabled?: boolean;
-  emptyFallbackMessage?: string;
-  availableSchemas?: SchemaInfo[];
-  availableFormFields?: FormField[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +88,7 @@ export interface Intent {
   examples?: string;
 }
 
-export interface IntentNodeData {
+export interface IntentNodeData extends StoreLifecycleHooks {
   label: string;
   contextPrompt: string;
   intents: Intent[];
@@ -119,31 +97,8 @@ export interface IntentNodeData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// StoreNode
-// ─────────────────────────────────────────────────────────────────────────────
-
-  export enum StorePermission {
-    INSERT = "insert",
-    EDIT = "edit",
-    DELETE = "delete",
-    SHOW = "show",
-  }
-
-  export interface StoreNodeData {
-    nodeId: string;
-    objectVar: string;
-    extractFromNodeId: string;
-    isArray: boolean;
-    isGlobal: boolean;
-    closeNodeId?: string;
-    permissions: StorePermission[];
-    feedbackVisible: boolean;
-    feedbackMessage?: string;
-  }
-  // ─────────────────────────────────────────────────────────────────────────────
 // RouterNodeData
 // ─────────────────────────────────────────────────────────────────────────────
-
 
 export interface RouterCondition {
   field: string;
@@ -151,7 +106,7 @@ export interface RouterCondition {
   value: string;
 }
 
-export interface RouterNodeData {
+export interface RouterNodeData extends StoreLifecycleHooks {
   label: string;
   conditions: RouterCondition[];
   availableFormFields: FormField[];
@@ -161,7 +116,7 @@ export interface RouterNodeData {
 // ConfirmationNodeData
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface ConfirmationNodeData {
+export interface ConfirmationNodeData extends StoreLifecycleHooks {
   label: string;
   confirmationMessage: string;
   positiveLabel: string;
@@ -176,10 +131,11 @@ export interface ConfirmationNodeData {
 
 export interface GoToNodeData {
   label: string;
-  /** ID del nodo destino. El engine lo resuelve en runtime — no se expande en el árbol. */
   targetNodeId: string;
   targetNodeLabel: string;
   reason: string;
+  clearFields?: string[];
+  // NO extiende StoreLifecycleHooks — ver justificación en versiones anteriores.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,16 +144,16 @@ export interface GoToNodeData {
 
 export interface FieldMapping {
   schemaField: string;
-  source: string; // "form:x" | "obj:varName.attr" | "auto:now" | "auto:order" | ""
+  source: string;
 }
 
-export interface InsertNodeData {
+export interface InsertNodeData extends StoreLifecycleHooks {
   label: string;
   selectedSchemaId: string;
-  schemaName: string;   
+  schemaName: string;
   fieldMappings: FieldMapping[];
-  outputEnabled?: boolean;   // ← nuevo
-  outputTemplate?: string;   // ← nuevo
+  outputEnabled?: boolean;
+  outputTemplate?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,94 +161,85 @@ export interface InsertNodeData {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface BodyField {
-  id: string;         // solo UI, no lo usa el engine
+  id: string;
   fieldName: string;
   fieldType: "string" | "number" | "boolean" | "date";
-  source: string;     // mismo patrón que FieldMapping.source + "static:valor"
+  source: string;
 }
 
-export interface ApiNodeData {
+export interface ApiNodeData extends StoreLifecycleHooks {
   label: string;
   url: string;
   bodyFields: BodyField[];
-  responseVar?: string; // variable donde guardar el objeto retornado (opcional)
+  responseVar?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NodeData — union discriminada de todos los tipos
+// StoreNodeData — absorbe lo que hacía OutputNodeData
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface StorePermissions {
+  create: boolean;
+  show: boolean;
+  delete: boolean;
+  update: boolean;
+}
+
+export interface StoreSearchOutput {
+  searchFeedback: boolean;
+  templateList?: string;
+  templateObj?: string;
+  emptyFallbackEnabled?: boolean;
+  emptyFallbackMessage?: string;
+  pageSize?: number;
+  globalCriteria?: GlobalCriteria[];
+}
+
+/**
+ * NO extiende StoreLifecycleHooks — el store no se auto-inicializa.
+ * Puede correr en dos modos según cómo lo conecte el frontend:
+ *   - flotante: sin next/branches, activado por initStores/finishStores
+ *     de otros nodos.
+ *   - inline: con next/branches (como el viejo outputNode), corre dentro
+ *     de la cadena del flujo cuando search === true.
+ */
+
+
+export interface StoreLinkedNode {
+  id: string;
+  label: string;
+}
+
+export interface StoreNodeData {
+  nodeId: string;
+  objectVar: string;
+  schemas: string[];
+  isArray: boolean;
+  storePermissions: StorePermissions;
+  search: boolean;
+  searchOutput?: StoreSearchOutput;
+  feedbackVisible: boolean;
+  feedbackMessage?: string;
+  llmDescription?: string;
+  configHash?: string;
+  operatorNotes?: string;
+   initNodes: StoreLinkedNode[];
+  finishNodes: StoreLinkedNode[];
+  label?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NodeData — union discriminada
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type NodeData =
   | ConversationNodeData
   | InputNodeData
-  | OutputNodeData
   | FallbackNodeData
   | IntentNodeData
   | RouterNodeData
   | ConfirmationNodeData
   | GoToNodeData
-  | InsertNodeData   // ← nuevo
-  | ApiNodeData    // ← nuevo
+  | InsertNodeData
+  | ApiNodeData
   | StoreNodeData;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MappedNode2 — árbol serializado que va al backend / LLM
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface MappedNode2 {
-  id: string;
-  type: NodeType;
-  data: NodeData;
-
-  /** Nodos lineales: conversationNode, inputNode, fallbackNode, goToNode */
-  next?: MappedNode2[];
-
-  /**
-   * Nodos de decisión:
-   *   intentNode       → { [intentId]: MappedNode2 }
-   *   routerNode       → { true: MappedNode2, false: MappedNode2 }
-   *   confirmationNode → { yes: MappedNode2, no: MappedNode2 }
-   *   outputNode       → { success: MappedNode2, empty: MappedNode2 }
-   */
-  branches?: Record<string, MappedNode2>;
-
-  /** Exclusivo de intentNode — rama cuando se agotan los maxRetries */
-  fallback?: MappedNode2;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UI persistence (nodos y edges de ReactFlow)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface FlowNode {
-  id: string;
-  type: NodeType;
-  position: { x: number; y: number };
-  data: NodeData;
-  measured?: { width: number; height: number };
-  selected?: boolean;
-  dragging?: boolean;
-}
-
-export interface FlowEdge {
-  id: string;
-  source: string;
-  target: string;
-  sourceHandle?: string;
-  type: "default" | "fallback" | "jump";
-  data?: { visualOnly?: boolean };
-  style?: Record<string, any>;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CreateMapflowPayload
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface CreateMapflowPayload {
-  name: string;
-  selectedSchemas: string[];
-  formFields: FormField[];
-  nodes: FlowNode[];
-  edges: FlowEdge[];
-  map: MappedNode2[];
-}

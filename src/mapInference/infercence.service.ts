@@ -10,6 +10,7 @@ import {
   SkeletonNode,
   FlowSkeleton,
   NodeConfigResult,
+  CatalogPatternMatch,
 } from './types';
 import { NodeType } from 'src/data/mapflow/types';
 
@@ -18,29 +19,15 @@ import { NodeType } from 'src/data/mapflow/types';
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface FlowAnalysis {
-  /**
-   * Clasificación de cada schema existente.
-   * El LLM determina para qué sirve cada uno.
-   */
   existingSchemaRoles: Array<{
     name: string;
-    /** true si este schema sirve para CONSULTAR y mostrar datos (outputNode) */
     coversQuery: boolean;
-    /** true si este schema sirve para INSERTAR datos del flujo (insertNode) */
     coversInsertion: boolean;
   }>;
-  /**
-   * Schemas que el flujo necesita pero no existen en los existentes.
-   * Ej: el usuario subió "inventario" pero el flujo necesita "pedidos" → missingSchemas: ["pedidos"]
-   */
   missingSchemas: string[];
-  /** El flujo necesita insertar datos en algún schema */
   requiresInsertion: boolean;
-  /** El flujo necesita mostrar una lista de items para que el usuario seleccione */
   requiresSelection: boolean;
-  /** El flujo tiene bifurcaciones de intención (el usuario elige entre opciones) */
   requiresIntent: boolean;
-  /** Razonamiento interno del LLM — se pasa como contexto al skeleton */
   reasoning: string;
 }
 
@@ -64,17 +51,14 @@ const ANALYZE_FLOW_TOOL: GroqTool = {
             type: 'object',
             required: ['name', 'coversQuery', 'coversInsertion'],
             properties: {
-              name: {
-                type: 'string',
-                description: 'Nombre exacto del schema existente.',
-              },
+              name: { type: 'string', description: 'Nombre exacto del schema existente.' },
               coversQuery: {
                 type: 'boolean',
-                description: 'true si este schema sirve para CONSULTAR y mostrar datos al usuario (outputNode). Ej: un schema de inventario/productos cubre consultas.',
+                description: 'true si este schema sirve para CONSULTAR y mostrar datos al usuario (storeNode en modo búsqueda). Ej: un schema de inventario/productos cubre consultas.',
               },
               coversInsertion: {
                 type: 'boolean',
-                description: 'true si este schema sirve para INSERTAR datos del flujo (insertNode). IMPORTANTE: un schema de inventario/productos NO cubre inserción de pedidos — los pedidos son una entidad diferente.',
+                description: 'true si este schema es el destino donde el flujo INSERTA nuevos registros (insertNode). IMPORTANTE: un schema de inventario/productos NO cubre inserción de pedidos — los pedidos son una entidad diferente.',
               },
             },
           },
@@ -82,23 +66,14 @@ const ANALYZE_FLOW_TOOL: GroqTool = {
         missingSchemas: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Nombres de schemas que el flujo necesita pero no existen en los schemas proporcionados. Ej: si el flujo inserta pedidos y no hay schema de pedidos → ["pedidos"]. Vacío [] si los schemas existentes cubren todo.',
+          description: 'Nombres de schemas que el flujo necesita pero no existen en los schemas proporcionados. Vacío [] si los schemas existentes cubren todo.',
         },
-        requiresInsertion: {
-          type: 'boolean',
-          description: 'true si el flujo necesita guardar/insertar datos en MongoDB.',
-        },
-        requiresSelection: {
-          type: 'boolean',
-          description: 'true si el flujo muestra una lista al usuario para que seleccione items (necesita outputNode + storeNode).',
-        },
-        requiresIntent: {
-          type: 'boolean',
-          description: 'true si el flujo tiene bifurcaciones donde el usuario elige entre opciones (necesita intentNode).',
-        },
+        requiresInsertion: { type: 'boolean', description: 'true si el flujo necesita guardar/insertar datos en MongoDB.' },
+        requiresSelection: { type: 'boolean', description: 'true si el flujo muestra opciones para que el usuario seleccione (necesita storeNode con search=true).' },
+        requiresIntent:    { type: 'boolean', description: 'true si el flujo tiene bifurcaciones donde el usuario elige entre opciones (necesita intentNode).' },
         reasoning: {
           type: 'string',
-          description: 'Razonamiento: qué tiene el negocio, para qué sirve cada schema, qué schemas faltan y por qué.',
+          description: 'Razonamiento: qué tiene el negocio, para qué sirve cada schema, qué schemas faltan y por qué. Si se te proporcionó un patrón de catálogo, incluye aquí si es compatible o no, y por qué.',
         },
       },
     },
@@ -147,17 +122,31 @@ const GENERATE_SKELETON_TOOL: GroqTool = {
             type: 'object',
             required: ['id', 'type', 'purpose'],
             properties: {
-              id:        { type: 'string' },
+              id:      { type: 'string' },
               type: {
                 type: 'string',
                 enum: [
                   'conversationNode', 'intentNode', 'inputNode',
-                  'outputNode', 'storeNode', 'insertNode',
+                  'storeNode', 'insertNode',
                   'confirmationNode', 'goToNode',
                 ],
               },
-              purpose:   { type: 'string' },
-              readsFrom: { type: 'string', description: 'Solo storeNode: ID del outputNode del que lee.' },
+              purpose: { type: 'string' },
+              storeMode: {
+                type: 'string',
+                enum: ['inline', 'floating'],
+                description: 'Solo para storeNode. "inline" si va en la cadena principal (next/branches). "floating" si es un store global sin edges propios, activado por initStores/finishStores de otros nodos. Si se omite, se asume "inline".',
+              },
+              initStores: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'IDs de storeNode (modo floating) que se ACTIVAN al llegar a este nodo. Solo aplica a nodos que no sean storeNode ni goToNode.',
+              },
+              finishStores: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'IDs de storeNode (modo floating) que se DESACTIVAN al llegar a este nodo. Solo aplica a nodos que no sean storeNode ni goToNode.',
+              },
             },
           },
         },
@@ -195,73 +184,76 @@ const GENERATE_NODE_CONFIG_TOOL: GroqTool = {
   },
 };
 
-
 const GENERATE_CHAIN_CONFIG_TOOL: GroqTool = {
   type: 'function',
   function: {
     name: 'generate_chain_config',
-    description: 'Configura la cadena outputNode → storeNode → insertNode como una unidad atómica, garantizando coherencia de campos entre los tres nodos.',
+    description: 'Configura la cadena storeNode → insertNode como una unidad atómica, garantizando coherencia de campos entre ambos.',
     parameters: {
       type: 'object',
-      required: ['success', 'outputConfig', 'storeConfig', 'insertConfig'],
+      required: ['success', 'storeConfig', 'insertConfig'],
       properties: {
         success: { type: 'boolean' },
         reformulationReason: { type: 'string' },
-        outputConfig: {
+        storeConfig: {
           type: 'object',
-          description: 'Config del outputNode.',
-          required: ['label', 'schemes', 'globalCriteria', 'templateMode', 'outputTemplate'],
+          description: 'Config del storeNode (búsqueda + captura). Reemplaza lo que antes eran outputNode + storeNode.',
+          required: ['label', 'nodeId', 'objectVar', 'schemas', 'isArray', 'storePermissions', 'search', 'feedbackVisible'],
           properties: {
-            label:               { type: 'string' },
-            schemes: {
+            label:     { type: 'string' },
+            nodeId:    { type: 'string', description: 'Mismo ID que el nodo en el skeleton.' },
+            objectVar: { type: 'string', description: 'Nombre de la variable en formState. Ej: "carrito", "cita_seleccionada".' },
+            schemas: {
               type: 'array',
-              items: {
-                type: 'object',
-                required: ['id', 'selectedSchema', 'selectedFields', 'schemaName'],
-                properties: {
-                  id:             { type: 'string', description: 'Identificador interno del scheme. Ej: "scheme_1". NUNCA el ObjectId de MongoDB.' },
-                  selectedSchema: { type: 'string', description: 'Nombre exacto del schema.' },
-                  selectedFields: { type: 'array', items: { type: 'string' }, description: 'Campos que serán cargados desde el schema. IMPORTANTE: si el outputNode alimenta un storeNode, SIEMPRE debe incluir el campo identificador ("id") aunque no aparezca en outputTemplate. El id es obligatorio para mantener referencias entre entidades.',},
-                  schemaName:     { type: 'string', description: 'Mismo valor que selectedSchema.' },
+              items: { type: 'string' },
+              description: 'Nombre(s) exacto(s) del/los schema(s) que este store consulta/captura.',
+            },
+            isArray: { type: 'boolean', description: 'true si acumula múltiples documentos (carrito), false si es uno solo.' },
+            storePermissions: {
+              type: 'object',
+              required: ['create', 'show', 'delete', 'update'],
+              properties: {
+                create: { type: 'boolean' },
+                show:   { type: 'boolean' },
+                delete: { type: 'boolean' },
+                update: { type: 'boolean' },
+              },
+            },
+            search: { type: 'boolean', description: 'true si este store puede buscar/consultar documentos.' },
+            searchOutput: {
+              type: 'object',
+              description: 'OBLIGATORIO si search=true.',
+              required: ['searchFeedback'],
+              properties: {
+                searchFeedback:       { type: 'boolean' },
+                templateList:         { type: 'string', description: 'Template Handlebars para VARIOS documentos.' },
+                templateObj:          { type: 'string', description: 'Template Handlebars para UN solo documento.' },
+                emptyFallbackEnabled: { type: 'boolean' },
+                emptyFallbackMessage: { type: 'string' },
+                pageSize:             { type: 'number' },
+                globalCriteria: {
+                  type: 'array',
+                  items: { type: 'object' },
+                  description: 'Filtros globales. [] si no hay filtros.',
                 },
               },
             },
-            globalCriteria:      { type: 'array', items: { type: 'object' }, description: 'Filtros globales. [] si no hay filtros.' },
-            templateMode:        { type: 'string', enum: ['list', 'message', 'raw'], description: 'Usar "list" cuando va seguido de storeNode.' },
-            outputTemplate:      { type: 'string', description: 'Template Handlebars. Ver formato en las instrucciones.' },
-            outputVisible:       { type: 'boolean' },
-            emptyFallbackEnabled:{ type: 'boolean' },
-            emptyFallbackMessage:{ type: 'string' },
-          },
-        },
-        storeConfig: {
-          type: 'object',
-          description: 'Config del storeNode. Los campos deben ser coherentes con los selectedFields del outputNode.',
-          required: ['label', 'nodeId', 'objectVar', 'extractFromNodeId', 'isArray', 'isGlobal', 'permissions', 'feedbackVisible', 'description'],
-          properties: {
-            label:            { type: 'string' },
-            nodeId:           { type: 'string', description: 'Mismo ID que el nodo en el skeleton.' },
-            objectVar:        { type: 'string', description: 'Nombre de la variable en formState. Ej: "carrito", "pedido_seleccionado".' },
-            extractFromNodeId:{ type: 'string', description: 'ID del outputNode del que lee. Debe coincidir exactamente.' },
-            isArray:          { type: 'boolean', description: 'true si acumula múltiples objetos (carrito), false si es uno solo.' },
-            isGlobal:         { type: 'boolean' },
-            closeNodeId:      { type: 'string' },
-            permissions:      { type: 'array', items: { type: 'string', enum: ['insert', 'edit', 'delete', 'show'] } },
-            feedbackVisible:  { type: 'boolean' },
-            feedbackMessage:  { type: 'string' },
-            description:      { type: 'string' },
-            triggerPhrases:   { type: 'string' },
-            avoidPhrases:     { type: 'string' },
+            feedbackVisible: { type: 'boolean' },
+            feedbackMessage: { type: 'string' },
+            llmDescription: {
+              type: 'string',
+              description: 'CRÍTICO en modo floating: el motor usa este texto para decidir si un mensaje del usuario aplica a este store. Sé específico sobre qué contiene y para qué sirve.',
+            },
           },
         },
         insertConfig: {
           type: 'object',
-          description: 'Config del insertNode. Los fieldMappings deben referenciar obj:objectVar.campo usando el objectVar del storeNode.',
+          description: 'Config del insertNode. fieldMappings deben referenciar obj:objectVar.campo usando el objectVar del storeNode.',
           required: ['label', 'selectedSchemaId', 'schemaName', 'fieldMappings'],
           properties: {
-            label:           { type: 'string' },
-            selectedSchemaId:{ type: 'string', description: 'Nombre del schema de inserción (no el de consulta).' },
-            schemaName:      { type: 'string' },
+            label:            { type: 'string' },
+            selectedSchemaId: { type: 'string', description: 'Nombre del schema de inserción (puede ser el mismo del storeNode u otro distinto).' },
+            schemaName:       { type: 'string' },
             fieldMappings: {
               type: 'array',
               items: {
@@ -276,15 +268,14 @@ const GENERATE_CHAIN_CONFIG_TOOL: GroqTool = {
                 },
               },
             },
-            outputEnabled:   { type: 'boolean' },
-            outputTemplate:  { type: 'string' },
+            outputEnabled:  { type: 'boolean' },
+            outputTemplate: { type: 'string' },
           },
         },
       },
     },
   },
 };
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Descripción semántica de nodos (para skeleton)
@@ -295,31 +286,46 @@ const NODE_SEMANTIC_DESCRIPTIONS = `
 
 - **conversationNode**: Entrega un mensaje al usuario o hace una pregunta libre. Nodo de inicio obligatorio (type: "start"). También para mensajes intermedios y cierre.
 
-- **inputNode**: Captura un valor escalar: texto, número, fecha, selección. Para campos simples como nombre, teléfono, cantidad. Para objetos complejos usa storeNode.
+- **inputNode**: Captura un valor escalar: texto, número, fecha, selección. Para campos simples como nombre, teléfono, cantidad. Para documentos completos de un schema usa storeNode.
 
 - **intentNode**: Clasifica el mensaje en ramas predefinidas. Cuando el flujo se bifurca: comprar vs consultar, continuar vs cancelar.
 
-- **outputNode**: Consulta datos de un schema y los muestra. Si va seguido de storeNode, usar templateMode: "raw".
+- **storeNode**: Consulta Y captura documentos de uno o más schemas — reemplaza lo que antes eran DOS nodos separados (outputNode + storeNode). Tiene DOS modos:
 
-- **storeNode**: Captura objetos que el usuario selecciona de una lista mostrada por outputNode. Memoria dinámica del flujo. SIEMPRE después de outputNode, nunca antes.
+  1. **INLINE** (vive en la cadena principal, con next/branches):
+     Se ejecuta una sola vez al llegar. Busca contra el mensaje del usuario en ese turno
+     — el motor decide automáticamente si es una búsqueda puntual o "mostrar todo", NO
+     necesitas configurar esa heurística — y avanza por dos branches OBLIGATORIOS:
+     "success" (encontró algo, lo guarda en objectVar) y "empty" (no encontró nada).
+     Úsalo para: "el usuario elige un producto de una lista", "selecciona un horario disponible".
 
-- **insertNode**: Persiste datos en MongoDB. Siempre después de storeNode o inputNode.
+  2. **FLOATING** (global, SIN next/branches):
+     No vive en la cadena principal. Se activa cuando el flujo llega a otro nodo que lo
+     declara en "initStores", y se desactiva cuando llega a un nodo que lo declara en
+     "finishStores". Mientras está activo, CUALQUIER mensaje del usuario se evalúa contra
+     este store: puede buscar, agregar, editar, eliminar o listar ítems, según sus
+     storePermissions. Úsalo para: carritos de compra, listas que el usuario arma
+     libremente durante varios turnos ("agrega X", "quita Y", "muéstrame lo que llevo").
 
-- **confirmationNode**: Muestra resumen y pide confirmación. Genera 2 edges: "yes" y "no". Siempre ANTES de insertNode.
+  En ambos modos, storeNode NUNCA persiste en MongoDB por sí mismo — solo mantiene el
+  objeto/lista en memoria (formState). Para persistir usa insertNode después.
+
+- **insertNode**: Persiste datos en MongoDB. Siempre después de storeNode o inputNode (directa o indirectamente, vía confirmationNode).
+
+- **confirmationNode**: Muestra resumen y pide confirmación. Genera 2 edges: "yes" y "no". Úsalo antes de insertNode cuando la acción de insertar es significativa (compra, cita, pedido) y conviene que el usuario confirme antes de guardar.
 
 - **goToNode**: Redirige a otro nodo. Para loops o menús.
 
 ## Reglas estructurales OBLIGATORIAS
 
 1. SIEMPRE empieza con conversationNode type "start".
-2. storeNode SIEMPRE después de outputNode — nunca antes.
-3. Cada storeNode tiene "readsFrom" apuntando a su outputNode.
-4. insertNode SIEMPRE después de storeNode o inputNode.
-5. confirmationNode SIEMPRE antes de insertNode — el flujo es: store → confirmation → insert.
-6. confirmationNode genera exactamente 2 edges: label "yes" → insertNode, label "no" → nodo anterior.
-7. goToNode solo para loops.
-8. Edges de nodos lineales (conversationNode, outputNode, storeNode, insertNode, inputNode) NUNCA llevan label.
-   label SOLO en edges de intentNode (id de la intención) y confirmationNode ("yes" / "no").
+2. storeNode INLINE: SIEMPRE genera exactamente 2 edges desde sí mismo — label "success" y label "empty".
+3. storeNode FLOATING: NUNCA tiene edges propios (ni entrantes ni salientes). Se activa/desactiva SOLO mediante "initStores"/"finishStores" declarados en OTROS nodos del skeleton — nunca lo dejes flotando sin que ningún nodo lo active.
+4. insertNode SIEMPRE después de storeNode o inputNode en el flujo lógico.
+5. Cuando hay confirmationNode, el orden es: store/input → confirmationNode → insertNode. confirmationNode genera exactamente 2 edges: label "yes" → insertNode, label "no" → nodo anterior.
+6. goToNode solo para loops.
+7. Edges de nodos lineales (conversationNode, insertNode, inputNode, goToNode) NUNCA llevan label.
+   label SOLO en: intentNode (id de la intención), confirmationNode ("yes"/"no"), storeNode inline ("success"/"empty").
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +339,8 @@ interface ConversationNodeData {
   type: "start" | "message" | "question" | "end";
   mode?: "template" | "ia";
   message: string;
+  initStores?: string[];   // IDs de storeNode floating a activar — se inyectan automáticamente, no los declares tú
+  finishStores?: string[]; // IDs de storeNode floating a desactivar — se inyectan automáticamente
 }
 // IMPORTANTE: el campo "type" aquí es el subtipo del nodo (start/message/question/end).
 // NO incluyas "type" con valor "conversationNode" dentro de config — eso va en el campo raíz del nodo.`,
@@ -345,6 +353,8 @@ interface InputNodeData {
   description: string;
   options?: string[];
   implicit?: boolean;
+  initStores?: string[];
+  finishStores?: string[];
 }`,
 
   intentNode: `
@@ -360,15 +370,16 @@ interface IntentNodeData {
   intents: Intent[];
   fallbackBehavior: "retry" | "goto_start";
   maxRetries: number;
+  initStores?: string[];
+  finishStores?: string[];
 }`,
 
-  outputNode: `
-interface SchemeObject {
-  id: string;             // identificador INTERNO del scheme dentro del nodo. Ej: "scheme_1", "scheme_2".
-                          // NUNCA uses aquí el ID de MongoDB. Es solo un índice local.
-  selectedSchema: string; // nombre exacto del schema (no el ID de MongoDB — se resuelve al confirmar)
-  selectedFields: string[];
-  schemaName: string;     // mismo valor que selectedSchema
+  storeNode: `
+interface StorePermissions {
+  create: boolean;
+  show: boolean;
+  delete: boolean;
+  update: boolean;
 }
 interface GlobalCriteria {
   scheme: string;
@@ -377,35 +388,32 @@ interface GlobalCriteria {
   value: string;
   valueSource: "form" | "static";
 }
-interface OutputNodeData {
-  label: string;
-  schemes: SchemeObject[];
-  globalCriteria: GlobalCriteria[];
-  outputTemplate?: string;
-  outputVisible?: boolean;
-  templateMode: "message" | "list" | "raw";
+interface StoreSearchOutput {
+  searchFeedback: boolean;
+  templateList?: string;   // Handlebars — para cuando hay VARIOS documentos
+  templateObj?: string;    // Handlebars — para cuando hay UN solo documento
   emptyFallbackEnabled?: boolean;
   emptyFallbackMessage?: string;
+  pageSize?: number;
+  globalCriteria?: GlobalCriteria[];
 }
-// IMPORTANTE: NO incluyas "type" dentro de config.`,
-
-  storeNode: `
 interface StoreNodeData {
   nodeId: string;
-  objectVar: string;
-  extractFromNodeId: string;
-  isArray: boolean;
-  isGlobal: boolean;
-  closeNodeId?: string;
-  permissions: Array<"insert" | "edit" | "delete" | "show">;
+  objectVar: string;   // nombre de la variable en formState. Ej: "carrito", "cita_seleccionada".
+  schemas: string[];   // nombre(s) exacto(s) del/los schema(s) que este store consulta/captura.
+  isArray: boolean;    // true si acumula múltiples documentos (carrito), false si es uno solo.
+  storePermissions: StorePermissions;
+  search: boolean;     // true si este store puede buscar/consultar documentos.
+  searchOutput?: StoreSearchOutput; // OBLIGATORIO si search=true.
   feedbackVisible: boolean;
   feedbackMessage?: string;
-  description: string;
-  triggerPhrases?: string;
-  avoidPhrases?: string;
+  llmDescription?: string; // CRÍTICO en modo floating: el motor decide con este texto si un mensaje aplica a este store.
+  label?: string;
 }
-// CRÍTICO: SIEMPRE después de outputNode. Para escalares usa inputNode.
-// IMPORTANTE: NO incluyas "type" dentro de config.`,
+// storeNode reemplaza lo que antes eran DOS nodos (outputNode + storeNode).
+// NUNCA persiste en MongoDB por sí mismo — solo mantiene el objeto/lista en formState.
+// IMPORTANTE: NO incluyas "type" dentro de config. NO tiene initStores/finishStores propios
+// (esos van en los nodos que lo activan/desactivan, no en el storeNode mismo).`,
 
   insertNode: `
 interface FieldMapping {
@@ -419,6 +427,8 @@ interface InsertNodeData {
   fieldMappings: FieldMapping[];
   outputEnabled?: boolean;
   outputTemplate?: string;
+  initStores?: string[];
+  finishStores?: string[];
 }`,
 
   confirmationNode: `
@@ -432,6 +442,8 @@ interface ConfirmationNodeData {
   positiveLabel: string;
   negativeLabel: string;
   summaryFields: SummaryField[];
+  initStores?: string[];
+  finishStores?: string[];
 }
 // Genera exactamente 2 edges: label "yes" → insertNode, label "no" → nodo anterior.
 // IMPORTANTE: NO incluyas "type" dentro de config.`,
@@ -442,6 +454,7 @@ interface GoToNodeData {
   targetNodeId: string;
   targetNodeLabel: string;
   reason: string;
+  clearFields?: string[];
 }`,
 };
 
@@ -454,6 +467,11 @@ export class MapflowInferenceService {
   private readonly logger = new Logger(MapflowInferenceService.name);
   private readonly MAX_REFORMULATIONS = 2;
 
+  /** Tipos de nodo cuya interfaz admite initStores/finishStores (ver StoreLifecycleHooks). */
+  private readonly LIFECYCLE_HOOK_TYPES: NodeType[] = [
+    'conversationNode', 'inputNode', 'intentNode', 'confirmationNode', 'insertNode',
+  ];
+
   constructor(private readonly groq: GroqService) {}
 
   // ─── Entry point ───────────────────────────────────────────────────────────
@@ -462,9 +480,9 @@ export class MapflowInferenceService {
     name: string,
     description: string,
     existingSchemas: ExistingSchemaContext[] = [],
+    catalogMatch: CatalogPatternMatch | null = null,
   ): Promise<MapflowAiOutput> {
-    // ── Fase 0: Análisis previo ───────────────────────────────────────────────
-    const analysis = await this.callAnalyzeFlow(name, description, existingSchemas);
+    const analysis = await this.callAnalyzeFlow(name, description, existingSchemas, catalogMatch);
 
     this.logger.log(
       `[MapflowInference] Análisis completado — ` +
@@ -474,81 +492,44 @@ export class MapflowInferenceService {
       `reasoning: ${analysis.reasoning}`,
     );
 
-    // ── Fases 1..N: Skeleton + Config ─────────────────────────────────────────
     let reformulationContext = '';
     let attempt = 0;
 
     while (attempt <= this.MAX_REFORMULATIONS) {
       const skeleton = await this.callGenerateSkeleton(
-        name,
-        description,
-        existingSchemas,
-        analysis,
-        reformulationContext,
+        name, description, existingSchemas, analysis, reformulationContext, catalogMatch,
       );
 
       this.validateSkeleton(skeleton);
 
       const configuredNodes: LlmNode[] = [];
       let reformulationReason = '';
-
-      // Detectar cadenas output → store → insert para configurarlas como unidad atómica
       const processedIds = new Set<string>();
 
       for (let i = 0; i < skeleton.nodes.length; i++) {
         const current = skeleton.nodes[i];
-
-        // Nodo ya procesado como parte de una cadena
         if (processedIds.has(current.id)) continue;
 
-        // Detectar cadena: outputNode seguido de storeNode seguido de insertNode
-        if (current.type === 'outputNode') {
-          const storeNode = skeleton.nodes.find(
-            (n) => n.type === 'storeNode' && n.readsFrom === current.id,
-          );
-          const insertNode = storeNode
-            ? skeleton.nodes.find((n, idx) => {
-                if (n.type !== 'insertNode') return false;
-                // El insertNode debe venir después del storeNode en el skeleton
-                const storeIdx = skeleton.nodes.findIndex((x) => x.id === storeNode.id);
-                return idx > storeIdx;
-              })
-            : null;
+        // Detectar cadena: storeNode con un insertNode más adelante en el skeleton
+        if (current.type === 'storeNode') {
+          const insertNode = skeleton.nodes.find((n, idx) => {
+            if (n.type !== 'insertNode' || processedIds.has(n.id)) return false;
+            return idx > i;
+          });
 
-          if (storeNode && insertNode) {
-            // Configurar la cadena completa en una sola llamada
-            const chainResult = await this.callGenerateChainConfig(
-              current,
-              storeNode,
-              insertNode,
-              skeleton,
-              existingSchemas,
-            );
+          if (insertNode) {
+            const chainResult = await this.callGenerateChainConfig(current, insertNode, skeleton, existingSchemas);
 
             if (!chainResult.success) {
-              reformulationReason = chainResult.reformulationReason ?? 'Incongruencia en la cadena output→store→insert.';
+              reformulationReason = chainResult.reformulationReason ?? 'Incongruencia en la cadena store→insert.';
               this.logger.warn(`[MapflowInference] Reformulando cadena (intento ${attempt + 1}): ${reformulationReason}`);
               break;
             }
 
-            configuredNodes.push({
-              id: current.id, type: current.type,
-              label: chainResult.outputConfig!.label ?? current.purpose,
-              config: chainResult.outputConfig!,
-            });
-            configuredNodes.push({
-              id: storeNode.id, type: storeNode.type,
-              label: chainResult.storeConfig!.label ?? storeNode.purpose,
-              config: chainResult.storeConfig!,
-            });
-            configuredNodes.push({
-              id: insertNode.id, type: insertNode.type,
-              label: chainResult.insertConfig!.label ?? insertNode.purpose,
-              config: chainResult.insertConfig!,
-            });
+            configuredNodes.push(this.finalizeNodeConfig(current, chainResult.storeConfig!, skeleton));
+            configuredNodes.push(this.finalizeNodeConfig(insertNode, chainResult.insertConfig!, skeleton));
 
             processedIds.add(current.id);
-            processedIds.add(storeNode.id);
             processedIds.add(insertNode.id);
             continue;
           }
@@ -564,12 +545,7 @@ export class MapflowInferenceService {
           break;
         }
 
-        configuredNodes.push({
-          id:     current.id,
-          type:   current.type,
-          label:  result.config!.label ?? current.purpose,
-          config: result.config!,
-        });
+        configuredNodes.push(this.finalizeNodeConfig(current, result.config!, skeleton));
       }
 
       if (configuredNodes.length === skeleton.nodes.length) {
@@ -590,14 +566,40 @@ export class MapflowInferenceService {
     });
   }
 
+  /**
+   * Ensambla el LlmNode final e inyecta initStores/finishStores de forma
+   * DETERMINISTA a partir del skeleton — nunca se le pide al LLM que los
+   * reproduzca, para evitar errores de transcripción de IDs.
+   */
+  private finalizeNodeConfig(
+    skeletonNode: SkeletonNode,
+    config: Record<string, any>,
+    skeleton: FlowSkeleton,
+  ): LlmNode {
+    const finalConfig = { ...config };
+
+    if (this.LIFECYCLE_HOOK_TYPES.includes(skeletonNode.type)) {
+      if (skeletonNode.initStores?.length)   finalConfig.initStores   = skeletonNode.initStores;
+      if (skeletonNode.finishStores?.length) finalConfig.finishStores = skeletonNode.finishStores;
+    }
+
+    return {
+      id:     skeletonNode.id,
+      type:   skeletonNode.type,
+      label:  finalConfig.label ?? skeletonNode.purpose,
+      config: finalConfig,
+    };
+  }
+
   // ─── Llamada 0: Análisis ───────────────────────────────────────────────────
 
   private async callAnalyzeFlow(
     name: string,
     description: string,
     existingSchemas: ExistingSchemaContext[],
+    catalogMatch: CatalogPatternMatch | null,
   ): Promise<FlowAnalysis> {
-    const prompt = this.buildAnalysisPrompt(name, description, existingSchemas);
+    const prompt = this.buildAnalysisPrompt(name, description, existingSchemas, catalogMatch);
 
     const result = await this.groq.chatWithTools(
       [{ role: 'user', content: prompt }],
@@ -606,9 +608,7 @@ export class MapflowInferenceService {
     );
 
     const toolCall = result.toolCalls[0];
-    if (!toolCall) {
-      throw new InternalServerErrorException({ message: 'Groq no llamó al tool analyze_flow.' });
-    }
+    if (!toolCall) throw new InternalServerErrorException({ message: 'Groq no llamó al tool analyze_flow.' });
 
     try {
       return JSON.parse(toolCall.function.arguments) as FlowAnalysis;
@@ -628,14 +628,9 @@ export class MapflowInferenceService {
     existingSchemas: ExistingSchemaContext[],
     analysis: FlowAnalysis,
     reformulationContext: string,
+    catalogMatch: CatalogPatternMatch | null,
   ): Promise<FlowSkeleton> {
-    const prompt = this.buildSkeletonPrompt(
-      name,
-      description,
-      existingSchemas,
-      analysis,
-      reformulationContext,
-    );
+    const prompt = this.buildSkeletonPrompt(name, description, existingSchemas, analysis, reformulationContext, catalogMatch);
 
     const result = await this.groq.chatWithTools(
       [{ role: 'user', content: prompt }],
@@ -644,9 +639,7 @@ export class MapflowInferenceService {
     );
 
     const toolCall = result.toolCalls[0];
-    if (!toolCall) {
-      throw new InternalServerErrorException({ message: 'Groq no llamó al tool generate_skeleton.' });
-    }
+    if (!toolCall) throw new InternalServerErrorException({ message: 'Groq no llamó al tool generate_skeleton.' });
 
     try {
       return JSON.parse(toolCall.function.arguments) as FlowSkeleton;
@@ -691,19 +684,15 @@ export class MapflowInferenceService {
     }
   }
 
-  // ─── Prompts ───────────────────────────────────────────────────────────────
-
-
-  // ─── Llamada de cadena: outputNode → storeNode → insertNode ──────────────
+  // ─── Llamada de cadena: storeNode → insertNode ────────────────────────────
 
   private async callGenerateChainConfig(
-    outputNode: SkeletonNode,
     storeNode: SkeletonNode,
     insertNode: SkeletonNode,
     skeleton: FlowSkeleton,
     existingSchemas: ExistingSchemaContext[],
-  ): Promise<{ success: boolean; reformulationReason?: string; outputConfig?: Record<string,any>; storeConfig?: Record<string,any>; insertConfig?: Record<string,any> }> {
-    const prompt = this.buildChainConfigPrompt(outputNode, storeNode, insertNode, skeleton, existingSchemas);
+  ): Promise<{ success: boolean; reformulationReason?: string; storeConfig?: Record<string, any>; insertConfig?: Record<string, any> }> {
+    const prompt = this.buildChainConfigPrompt(storeNode, insertNode, skeleton, existingSchemas);
 
     const result = await this.groq.chatWithTools(
       [{ role: 'user', content: prompt }],
@@ -714,7 +703,7 @@ export class MapflowInferenceService {
     const toolCall = result.toolCalls[0];
     if (!toolCall) {
       throw new InternalServerErrorException({
-        message: `Groq no llamó al tool generate_chain_config para cadena "${outputNode.id}→${storeNode.id}→${insertNode.id}".`,
+        message: `Groq no llamó al tool generate_chain_config para cadena "${storeNode.id}→${insertNode.id}".`,
       });
     }
 
@@ -728,132 +717,210 @@ export class MapflowInferenceService {
     }
   }
 
+  // ─── Templates de ejemplo ──────────────────────────────────────────────────
 
   /**
-   * Construye el ejemplo de outputTemplate Handlebars de forma segura.
-   * Se hace con concatenación en lugar de template literal anidado para
-   * evitar el conflicto de sintaxis entre ${...} (JS) y {{...}} (Handlebars).
+   * Ejemplo de templateList/templateObj Handlebars, con concatenación en
+   * lugar de template literal anidado para evitar conflicto de sintaxis
+   * entre ${...} (JS) y {{...}} (Handlebars).
    */
-  private buildTemplateExample(schema: ExistingSchemaContext): string {
+  private buildStoreTemplateExample(schema: { name: string; fields: Array<{ name: string }> }): string {
     const schemaName = schema.name;
-    const f1 = schema.fields[1]?.name ?? 'nombre';
+    const f1 = schema.fields[1]?.name ?? schema.fields[0]?.name ?? 'nombre';
     const f2 = schema.fields[2]?.name;
     const f3 = schema.fields[3]?.name;
 
-    let line = '- {{' + schemaName + '.' + f1 + '}}';
-    if (f2) line += ' de {{' + schemaName + '.' + f2 + '}}';
-    if (f3) line += ' a ${{' + schemaName + '.' + f3 + '}}';
+    let listLine = '- {{' + schemaName + '.' + f1 + '}}';
+    if (f2) listLine += ' de {{' + schemaName + '.' + f2 + '}}';
+    if (f3) listLine += ' a ${{' + schemaName + '.' + f3 + '}}';
+
+    const objLine = '{{' + schemaName + '.' + f1 + '}}' + (f2 ? ' — {{' + schemaName + '.' + f2 + '}}' : '');
 
     const lines = [
-      'Ejemplo de outputTemplate para "' + schemaName + '":',
+      'Ejemplo de templates para "' + schemaName + '":',
+      '',
+      'templateList (varios documentos):',
       '```',
-      'Aquí tienes nuestros productos disponibles:',
+      'Aquí tienes las opciones disponibles:',
       '{{#each}}',
-      line,
+      listLine,
       '{{/each}}',
       '```',
       '',
-      'Reglas del template:',
-      '- Usa {{#each}}...{{/each}} para listar múltiples objetos',
-      '- Dentro del each: {{nombreSchema.campo}}',
-      '- Texto estático fuera del each',
-      '- Sin each si es un solo objeto: {{nombreSchema.campo}} directo',
+      'templateObj (un solo documento):',
+      '```',
+      'Encontré: ' + objLine,
+      '```',
+      '',
+      'Reglas:',
+      '- Dentro de {{#each}}...{{/each}}: {{nombreSchema.campo}}',
+      '- templateObj NO usa {{#each}} — {{nombreSchema.campo}} directo.',
+      '- Texto estático fuera de las llaves.',
     ];
 
     return lines.join('\n');
   }
 
+  // ─── Catálogo ──────────────────────────────────────────────────────────────
+
+  /**
+   * Resume el runtime del catálogo en texto plano para el prompt.
+   * Omite valores de schema (schemas/selectedSchemaId/schemaName) porque
+   * son referencias del tenant admin que originó el patrón — solo interesa
+   * la ESTRUCTURA y el ROL de cada nodo. "llmDescription" SÍ se conserva:
+   * es texto de propósito de negocio, útil como referencia, no un ID.
+   */
+  private summarizeCatalogRuntime(runtime: any): string {
+    const nodes: Record<string, any> = runtime?.nodes ?? {};
+    const OMIT_KEYS = new Set(['schemas', 'selectedSchemaId', 'schemaName', 'configHash']);
+
+    const lines = Object.values(nodes).map((n: any) => {
+      const next     = n.next?.length ? ` → [${n.next.join(', ')}]` : '';
+      const branches = n.branches ? ` branches=${JSON.stringify(n.branches)}` : '';
+      const fallback = n.fallback ? ` fallback="${n.fallback}"` : '';
+
+      const cleanedData = Object.fromEntries(
+        Object.entries(n.data ?? {}).filter(([k]) => !OMIT_KEYS.has(k)),
+      );
+
+      return `- "${n.id}" (${n.type})${next}${branches}${fallback}\n  data: ${JSON.stringify(cleanedData)}`;
+    });
+
+    return `startNode: "${runtime?.startNode}"\n${lines.join('\n')}`;
+  }
+
+  private buildCatalogSection(catalogMatch: CatalogPatternMatch | null): string {
+    if (!catalogMatch) return '';
+
+    const businessContextSection =
+      catalogMatch.mapflowDescription || catalogMatch.mapflowMd
+        ? `### Por qué y para qué sirve este patrón (contexto de negocio original)
+${catalogMatch.mapflowDescription ? `**Descripción:** ${catalogMatch.mapflowDescription}\n` : ''}${
+            catalogMatch.mapflowMd ? `**Racional / notas:**\n${catalogMatch.mapflowMd}\n` : ''
+          }`
+        : '';
+
+    const schemasSection = catalogMatch.catalogSchemas.length
+      ? `### Forma de los schemas que usaba el patrón original (solo referencia — NO existen para este cliente)
+${catalogMatch.catalogSchemas
+  .map(
+    (s) =>
+      `- "${s.name}" (${s.category})${s.description ? ` — ${s.description}` : ''}\n  Campos: ${s.fields
+        .map((f) => `${f.name} (${f.type}${f.required ? ', requerido' : ''})`)
+        .join(', ')}`,
+  )
+  .join('\n')}
+
+Úsalos como GUÍA de qué campos suele necesitar este tipo de negocio — especialmente
+útil si el cliente actual NO subió schemas propios. Si el cliente SÍ subió schemas,
+prioriza siempre los suyos.`
+      : '';
+
+    return `## 📦 PATRÓN DE CATÁLOGO ENCONTRADO (referencia — similitud=${catalogMatch.score.toFixed(2)})
+
+${businessContextSection}
+Se encontró un runtime ya construido y validado para un modelo de negocio similar.
+Tu tarea NO es copiarlo literalmente, sino:
+
+1. Evaluar si su estructura y su racional de negocio son compatibles con la
+   descripción y los schemas de ESTE cliente.
+2. Si es compatible: úsalo como base, adaptando nombres de schema a los
+   schemas reales de este cliente (existentes o inferidos) — NUNCA reutilices
+   literalmente valores de "schemas"/"selectedSchemaId" de este patrón,
+   pertenecen a otro cliente y no existen aquí.
+3. Si el patrón cubre más o menos de lo que el cliente pidió, ajusta.
+4. Si NO es compatible, ignóralo por completo y diseña desde cero.
+
+${schemasSection}
+
+Runtime de referencia (estructura de nodos):
+${this.summarizeCatalogRuntime(catalogMatch.runtime)}
+`;
+  }
+
+  // ─── Prompts ───────────────────────────────────────────────────────────────
+
   private buildChainConfigPrompt(
-    outputNode: SkeletonNode,
     storeNode: SkeletonNode,
     insertNode: SkeletonNode,
     skeleton: FlowSkeleton,
     existingSchemas: ExistingSchemaContext[],
   ): string {
-    // Schema de consulta (outputNode) — el que ya existe
-    const querySchema = existingSchemas.find((s) =>
-      skeleton.inferredSchemas.every((inf) => inf.name !== s.name),
-    ) ?? existingSchemas[0];
-
-    // Schema de inserción — puede ser inferido o existente
-    const allSchemas = [
-      ...existingSchemas.map((s) => ({ ...s, isNew: false })),
-      ...skeleton.inferredSchemas.map((s) => ({ ...s, id: s.name, isNew: true })),
+    const allSchemas: Array<{ name: string; fields: Array<{ name: string; type: string }>; isNew: boolean }> = [
+      ...existingSchemas.map((s) => ({ name: s.name, fields: s.fields, isNew: false })),
+      ...skeleton.inferredSchemas.map((s) => ({ name: s.name, fields: s.fields, isNew: true })),
     ];
-    const insertSchema = allSchemas.find((s) =>
-      s.name !== querySchema?.name,
-    );
 
-    const querySchemaSection = querySchema
-      ? `## Schema de CONSULTA (outputNode) — ya existe en DB
-- Nombre: "${querySchema.name}"
-- Campos disponibles: ${querySchema.fields.map((f) => `${f.name} (${f.type})`).join(', ')}
-- Usa este schema en outputNode.schemes[].selectedSchema y selectedFields.`
-      : '## Schema de consulta\nNo hay schema existente — usa el schema inferido.';
+    const storeSchema  = allSchemas[0];
+    const insertSchema = allSchemas.find((s) => s.name !== storeSchema?.name) ?? storeSchema;
+
+    const storeSchemaSection = storeSchema
+      ? `## Schema que el storeNode CONSULTA/CAPTURA
+- Nombre: "${storeSchema.name}"
+- Campos disponibles: ${storeSchema.fields.map((f) => `${f.name} (${f.type})`).join(', ')}
+- Usa este nombre en storeConfig.schemas (array — normalmente un solo elemento).`
+      : '## Schema del storeNode\nUsa el schema inferido disponible.';
 
     const insertSchemaSection = insertSchema
       ? `## Schema de INSERCIÓN (insertNode) — ${insertSchema.isNew ? 'NUEVO, inferido' : 'ya existe en DB'}
 - Nombre: "${insertSchema.name}"
-- Campos: ${insertSchema.fields.map((f: any) => `${f.name} (${f.type})`).join(', ')}
+- Campos: ${insertSchema.fields.map((f) => `${f.name} (${f.type})`).join(', ')}
 - Usa este schema en insertNode.selectedSchemaId y fieldMappings.`
       : '';
 
-    // Ejemplo de template Handlebars basado en el schema real
-    const templateExample = querySchema
-      ? this.buildTemplateExample(querySchema)
-      : '';
+    const templateExample = storeSchema ? this.buildStoreTemplateExample(storeSchema) : '';
+    const mode = storeNode.storeMode ?? 'inline';
 
     return `Eres un experto en configuración de flujos conversacionales.
 
-Debes configurar una CADENA ATÓMICA de 3 nodos que son codependientes.
-Es CRÍTICO que los campos sean coherentes entre los 3 nodos.
+Debes configurar una CADENA ATÓMICA de 2 nodos codependientes.
+Es CRÍTICO que los campos sean coherentes entre ambos.
 
 ## Flujo completo (referencia)
 ${skeleton.nodes.map((n) => `${n.id} (${n.type})`).join(' → ')}
 
-## Los 3 nodos a configurar juntos
+## Los 2 nodos a configurar juntos
 
-1. **outputNode** "${outputNode.id}" — muestra datos al usuario
-   - Propósito: ${outputNode.purpose}
-
-2. **storeNode** "${storeNode.id}" — captura lo que el usuario selecciona
+1. **storeNode** "${storeNode.id}" — busca y captura el/los documento(s) que el usuario selecciona
    - Propósito: ${storeNode.purpose}
-   - extractFromNodeId DEBE ser: "${outputNode.id}"
+   - Modo: ${mode}
+   ${mode === 'floating'
+     ? '- FLOTANTE: NO lleva next/branches propios. "llmDescription" es CRÍTICO — el motor lo usa para decidir en runtime si un mensaje del usuario aplica a este store.'
+     : '- INLINE: ya tiene 2 edges definidos en el skeleton (label "success" y label "empty") — no los repitas aquí, solo configura la data del nodo.'}
 
-3. **insertNode** "${insertNode.id}" — persiste los datos en MongoDB
+2. **insertNode** "${insertNode.id}" — persiste los datos en MongoDB
    - Propósito: ${insertNode.purpose}
 
-${querySchemaSection}
+${storeSchemaSection}
 
 ${insertSchemaSection}
 
-## Reglas de coherencia entre los 3 nodos (OBLIGATORIAS)
+## Reglas de coherencia (OBLIGATORIAS)
 
-1. Los campos en outputNode.schemes[].selectedFields (a menos que la logica de negocio lo necesite o el usaurio lo solicite, 
-    no se debera mostrar el id en el outputTemplate a pesar de que exista en los selectedfields)
-2. El storeNode captura exactamente esos objetos — objectVar es el nombre de la variable (ej: "carrito").
-3. El insertNode mapea los campos usando "obj:objectVar.campo":
-   - Si objectVar="carrito" y selectedFields=["nombre","precio"] →
+1. storeConfig.objectVar es el nombre de la variable en formState (ej: "carrito", "cita_seleccionada").
+2. insertConfig.fieldMappings usa "obj:objectVar.campo":
+   - Si objectVar="carrito" y el schema capturado tiene campos "nombre","precio" →
      fieldMappings: [{ schemaField: "nombre", source: "obj:carrito.nombre" }, ...]
-4. El schema del outputNode y el del insertNode son DIFERENTES:
-   - outputNode.schemes[].selectedSchema = schema de CONSULTA ("${querySchema?.name ?? 'schema_consulta'}")
-   - insertNode.selectedSchemaId = schema de INSERCIÓN ("${insertSchema?.name ?? 'schema_insercion'}")
-5. schemes[].id es un identificador INTERNO del nodo ("scheme_1", "scheme_2") — NUNCA el ObjectId de MongoDB.
+3. storeConfig.schemas = schema(s) que el store CONSULTA/CAPTURA ("${storeSchema?.name ?? 'schema_consulta'}").
+   insertConfig.selectedSchemaId = schema donde se INSERTA ("${insertSchema?.name ?? 'schema_insercion'}").
+   Pueden ser el mismo schema (ej. editar directo) o diferentes (ej. producto → pedido).
+4. Si search=true, searchOutput es OBLIGATORIO — incluye templateList Y templateObj.
 
-## Formato del outputTemplate (Handlebars)
+## Formato de los templates (Handlebars)
 
 ${templateExample}
 
 ## Regla crítica de config
 NUNCA incluyas el campo "type" con el nombre del tipo de nodo dentro de ningún config.
 
-Llama al tool generate_chain_config con la configuración completa de los 3 nodos.`;
+Llama al tool generate_chain_config con la configuración completa de los 2 nodos.`;
   }
 
   private buildAnalysisPrompt(
     name: string,
     description: string,
     existingSchemas: ExistingSchemaContext[],
+    catalogMatch: CatalogPatternMatch | null,
   ): string {
     const schemaSection = existingSchemas.length
       ? `## Schemas existentes del cliente (YA EXISTEN en la base de datos)
@@ -862,6 +929,8 @@ ${existingSchemas.map((s) =>
   Campos: ${s.fields.map((f) => `${f.name} (${f.type}${f.required ? ', requerido' : ''})`).join(', ')}`
 ).join('\n')}`
       : '## Schemas existentes\nEl cliente no proporcionó schemas.';
+
+    const catalogSection = this.buildCatalogSection(catalogMatch);
 
     return `Eres un analista de flujos conversacionales para chatbots de negocio.
 
@@ -873,22 +942,16 @@ Tu tarea es entender qué schemas tiene el negocio, clasificar su rol, e identif
 
 ${schemaSection}
 
+${catalogSection}
+
 ## Cómo clasificar cada schema existente
 
-Para cada schema que el cliente proporcionó, determina:
-
-**coversQuery = true** si el schema tiene datos que el flujo necesita MOSTRAR al usuario.
-- Ej: schema "inventario_farmaceutico" con campos nombre/precio → un flujo de ventas lo usa para mostrar el catálogo → coversQuery: true
-
-**coversInsertion = true** si el schema es el destino donde el flujo INSERTA nuevos registros.
-- Ej: schema "pedidos" con campos fecha/total → el flujo inserta ahí los pedidos → coversInsertion: true
+**coversQuery = true** si el schema tiene datos que el flujo necesita MOSTRAR/CAPTURAR (storeNode).
+**coversInsertion = true** si el schema es el destino donde el flujo INSERTA nuevos registros (insertNode).
 - REGLA CRÍTICA: un schema de inventario/productos/catálogo NUNCA cubre inserción de pedidos.
-  Los pedidos son una entidad diferente. Un schema de "inventario_farmaceutico" tiene coversInsertion: false
-  para un flujo de ventas — los pedidos deben ir en un schema separado.
 
 ## Cómo identificar schemas faltantes
 
-Después de clasificar los existentes, determina qué schemas necesita el flujo y no están cubiertos:
 - Si el flujo inserta pedidos y no hay schema con coversInsertion=true → missingSchemas: ["pedidos"]
 - Si el flujo muestra un catálogo y hay un schema con coversQuery=true → NO hace falta uno nuevo
 - Si el cliente no subió ningún schema y el flujo necesita datos → infiere todos los necesarios
@@ -897,14 +960,14 @@ Después de clasificar los existentes, determina qué schemas necesita el flujo 
 
 Caso 1: Cliente sube "inventario_farmaceutico", flujo de ventas con pedidos
 → existingSchemaRoles: [{ name: "inventario_farmaceutico", coversQuery: true, coversInsertion: false }]
-→ missingSchemas: ["pedidos"]  ← porque el flujo inserta pedidos y no hay schema para eso
+→ missingSchemas: ["pedidos"]
 
 Caso 2: Cliente sube "inventario" y "pedidos", flujo de ventas
 → existingSchemaRoles: [
     { name: "inventario", coversQuery: true, coversInsertion: false },
     { name: "pedidos", coversQuery: false, coversInsertion: true }
   ]
-→ missingSchemas: []  ← todo está cubierto
+→ missingSchemas: []
 
 Caso 3: Cliente no sube ningún schema, flujo de agenda
 → existingSchemaRoles: []
@@ -919,6 +982,7 @@ Llama al tool analyze_flow con tu análisis.`;
     existingSchemas: ExistingSchemaContext[],
     analysis: FlowAnalysis,
     reformulationContext: string,
+    catalogMatch: CatalogPatternMatch | null,
   ): string {
     const schemaSection = existingSchemas.length
       ? `## ⚠️ SCHEMAS EXISTENTES — DEBES USARLOS OBLIGATORIAMENTE
@@ -931,9 +995,8 @@ ${existingSchemas.map((s) =>
 ).join('\n\n')}
 
 REGLAS ESTRICTAS:
-→ Cualquier outputNode o insertNode que maneje estos datos DEBE referenciar el nombre exacto del schema.
+→ Cualquier storeNode o insertNode que maneje estos datos DEBE referenciar el nombre exacto del schema.
 → inferredSchemas SOLO puede contener schemas para datos que NINGUNO de los schemas anteriores cubre.
-→ NUNCA crees un schema con diferente nombre que cumpla la misma función de uno ya existente.
 → Roles confirmados por el análisis:
 ${analysis.existingSchemaRoles.map((r) =>
   `  • "${r.name}": consulta=${r.coversQuery ? 'SÍ' : 'NO'}, inserción=${r.coversInsertion ? 'SÍ' : 'NO'}`
@@ -943,14 +1006,15 @@ ${analysis.missingSchemas.length ? `→ Schemas adicionales a inferir: ${analysi
 El cliente no proporcionó schemas. Infiere los necesarios en inferredSchemas.
 El análisis sugiere: ${analysis.missingSchemas.length ? analysis.missingSchemas.join(', ') : 'decide según la descripción'}.`;
 
-    // Contexto del análisis previo
     const analysisSection = `## Análisis previo del flujo
 ${analysis.reasoning}
 
 Conclusiones:
-- ¿Necesita mostrar lista para selección? → ${analysis.requiresSelection ? 'SÍ (incluir outputNode + storeNode)' : 'NO'}
-- ¿Necesita insertar datos? → ${analysis.requiresInsertion ? 'SÍ (incluir confirmationNode + insertNode)' : 'NO'}
+- ¿Necesita mostrar/capturar opciones? → ${analysis.requiresSelection ? 'SÍ (incluir storeNode con search=true)' : 'NO'}
+- ¿Necesita insertar datos? → ${analysis.requiresInsertion ? 'SÍ (incluir insertNode, y confirmationNode si la acción amerita confirmar)' : 'NO'}
 - ¿Tiene bifurcaciones de intención? → ${analysis.requiresIntent ? 'SÍ (incluir intentNode)' : 'NO'}`;
+
+    const catalogSection = this.buildCatalogSection(catalogMatch);
 
     const reformulationSection = reformulationContext
       ? `## ⚠️ REFORMULACIÓN REQUERIDA\n${reformulationContext}\nCorrige este problema en el nuevo skeleton.`
@@ -968,17 +1032,22 @@ ${schemaSection}
 
 ${analysisSection}
 
+${catalogSection}
+
 ${NODE_SEMANTIC_DESCRIPTIONS}
 
 ${reformulationSection}
 
 ## Instrucciones finales
-1. Flujo mínimo que cumpla la descripción — sin nodos innecesarios.
+1. Flujo mínimo que cumpla la descripción — sin nodos innecesarios, salvo que el
+   patrón de catálogo (si aplica y es compatible) justifique nodos adicionales.
 2. IDs semánticos: "node_saludo", "node_mostrar_productos", "node_store_carrito".
-3. storeNode: incluye "readsFrom" con el ID del outputNode del que leerá.
-4. El orden OBLIGATORIO cuando hay selección e inserción: outputNode → storeNode → confirmationNode → insertNode.
-5. confirmationNode genera EXACTAMENTE 2 edges: label "yes" → insertNode, label "no" → nodo anterior al confirmation.
-6. En inferredSchemas usa nombres de schema (sin IDs — aún no existen).
+3. Para cada storeNode define "storeMode" explícitamente ("inline" o "floating").
+4. Si un storeNode es "floating", DEBES declarar en algún otro nodo "initStores": ["<id_del_store>"]
+   para activarlo, y opcionalmente "finishStores" en el nodo donde deba desactivarse.
+5. El orden cuando hay selección e inserción: storeNode(inline) → [confirmationNode] → insertNode.
+6. confirmationNode, cuando exista, genera EXACTAMENTE 2 edges: label "yes" → insertNode, label "no" → nodo anterior.
+7. En inferredSchemas usa nombres de schema (sin IDs — aún no existen).
 
 Llama al tool generate_skeleton.`;
   }
@@ -995,33 +1064,31 @@ Llama al tool generate_skeleton.`;
       .map((t) => NODE_INTERFACES[t])
       .join('\n\n');
 
-    // Schemas disponibles para referenciar
     const schemasRef: string[] = [];
     existingSchemas.forEach((s) => {
-      schemasRef.push(
-        `- "${s.name}" (EXISTENTE en DB, ID: "${s.id}") — campos: ${s.fields.map((f) => f.name).join(', ')}`,
-      );
+      schemasRef.push(`- "${s.name}" (EXISTENTE en DB, ID: "${s.id}") — campos: ${s.fields.map((f) => f.name).join(', ')}`);
     });
     skeleton.inferredSchemas.forEach((s) => {
-      schemasRef.push(
-        `- "${s.name}" (NUEVO — sin ID aún, referenciar por nombre) — campos: ${s.fields.map((f) => f.name).join(', ')}`,
-      );
+      schemasRef.push(`- "${s.name}" (NUEVO — sin ID aún, referenciar por nombre) — campos: ${s.fields.map((f) => f.name).join(', ')}`);
     });
 
-    const schemasSection = schemasRef.length
-      ? `## Schemas disponibles\n${schemasRef.join('\n')}`
-      : '';
+    const schemasSection = schemasRef.length ? `## Schemas disponibles\n${schemasRef.join('\n')}` : '';
 
     const previousSection = previous
-      ? `## Nodo anterior\n- ID: "${previous.id}" | Tipo: ${previous.type}\n- Propósito: "${previous.purpose}"${previous.readsFrom ? `\n- readsFrom: "${previous.readsFrom}"` : ''}`
+      ? `## Nodo anterior\n- ID: "${previous.id}" | Tipo: ${previous.type}\n- Propósito: "${previous.purpose}"`
       : '## Nodo anterior\nEste es el primer nodo del flujo.';
 
     const dependencySection = this.buildDependencyContext(current, skeleton);
+    const lifecycleSection  = this.buildLifecycleSection(current, skeleton);
 
     const outgoing = skeleton.edges.filter((e) => e.source === current.id);
     const edgesSection = outgoing.length
       ? `## Edges salientes\n${outgoing.map((e) => `- → "${e.target}"${e.label ? ` (branch: "${e.label}")` : ''}`).join('\n')}`
       : '## Edges\nNodo terminal.';
+
+    const templateGuidance = current.type === 'storeNode' && !this.hasChainPartner(current, skeleton)
+      ? `\n## Formato de templates (Handlebars)\n${this.buildStoreTemplateExampleFromSkeleton(current, skeleton, existingSchemas)}\n`
+      : '';
 
     return `Eres un experto en configuración de flujos conversacionales.
 
@@ -1032,20 +1099,22 @@ ${previousSection}
 
 ## Nodo actual: "${current.id}" (${current.type})
 - Propósito: "${current.purpose}"
-${current.readsFrom ? `- readsFrom: "${current.readsFrom}"` : ''}
+${current.storeMode ? `- storeMode: "${current.storeMode}"` : ''}
 
 ${edgesSection}
 
 ${dependencySection}
 
-${schemasSection}
+${lifecycleSection}
 
+${schemasSection}
+${templateGuidance}
 ## Interfaces TypeScript
 ${interfacesSection}
 
 ## Regla crítica de config
 NUNCA incluyas el campo "type" con el nombre del tipo de nodo dentro de config.
-El "type" del nodo va en el campo raíz — dentro de config solo van los campos de la interfaz.
+NUNCA incluyas "initStores"/"finishStores" en tu respuesta — se inyectan automáticamente después. Concéntrate solo en el resto de la data.
 Ejemplo INCORRECTO: config: { "type": "confirmationNode", "label": "..." }
 Ejemplo CORRECTO:   config: { "label": "..." }
 
@@ -1058,6 +1127,50 @@ Ejemplo CORRECTO:   config: { "label": "..." }
 Llama al tool generate_node_config.`;
   }
 
+  /** true si este storeNode va a ser (o ya fue) configurado como parte de una cadena store→insert. */
+  private hasChainPartner(current: SkeletonNode, skeleton: FlowSkeleton): boolean {
+    const idx = skeleton.nodes.findIndex((n) => n.id === current.id);
+    return skeleton.nodes.some((n, i) => n.type === 'insertNode' && i > idx);
+  }
+
+  private buildStoreTemplateExampleFromSkeleton(
+    current: SkeletonNode,
+    skeleton: FlowSkeleton,
+    existingSchemas: ExistingSchemaContext[],
+  ): string {
+    const allSchemas = [...existingSchemas, ...skeleton.inferredSchemas];
+    const schema = allSchemas[0];
+    if (!schema) return '';
+    return this.buildStoreTemplateExample(schema);
+  }
+
+  private buildLifecycleSection(current: SkeletonNode, skeleton: FlowSkeleton): string {
+    const parts: string[] = [];
+
+    if (current.initStores?.length) {
+      const stores = current.initStores.map((id) => skeleton.nodes.find((n) => n.id === id)).filter(Boolean) as SkeletonNode[];
+      if (stores.length) {
+        parts.push(
+          `Este nodo ACTIVA los siguientes stores globales al ejecutarse (se inyecta automáticamente ` +
+          `en "initStores" — NO lo repitas en tu config, pero ten en cuenta su propósito al redactar mensajes):\n` +
+          stores.map((s) => `- "${s.id}": ${s.purpose}`).join('\n'),
+        );
+      }
+    }
+
+    if (current.finishStores?.length) {
+      const stores = current.finishStores.map((id) => skeleton.nodes.find((n) => n.id === id)).filter(Boolean) as SkeletonNode[];
+      if (stores.length) {
+        parts.push(
+          `Este nodo DESACTIVA los siguientes stores globales al ejecutarse (se inyecta automáticamente en "finishStores"):\n` +
+          stores.map((s) => `- "${s.id}": ${s.purpose}`).join('\n'),
+        );
+      }
+    }
+
+    return parts.length ? `## Ciclo de vida de stores globales\n${parts.join('\n\n')}` : '';
+  }
+
   // ─── Contexto de dependencias ─────────────────────────────────────────────
 
   private buildDependencyContext(current: SkeletonNode, skeleton: FlowSkeleton): string {
@@ -1066,11 +1179,10 @@ Llama al tool generate_node_config.`;
 
     switch (current.type) {
       case 'storeNode': {
-        if (!current.readsFrom) return '';
-        const outputNode = skeleton.nodes.find((n) => n.id === current.readsFrom);
-        return outputNode
-          ? `## Dependencia\nEste storeNode lee del outputNode "${outputNode.id}".\n"extractFromNodeId" debe ser exactamente "${outputNode.id}".`
-          : '';
+        const mode = current.storeMode ?? 'inline';
+        return mode === 'floating'
+          ? '## Modo\nEste storeNode es FLOTANTE — NO debe llevar next ni branches propios. Se activa/desactiva desde "initStores"/"finishStores" de otros nodos.'
+          : '## Modo\nEste storeNode es INLINE — ya tiene definidos en el skeleton exactamente 2 edges salientes: label "success" y label "empty".';
       }
       case 'insertNode': {
         const inputs = priorNodes.filter((n) => n.type === 'inputNode');
@@ -1090,9 +1202,7 @@ Llama al tool generate_node_config.`;
         return parts.join('\n');
       }
       case 'goToNode': {
-        const targets = priorNodes.map(
-          (n) => `- ID: "${n.id}" | Tipo: ${n.type} | Propósito: "${n.purpose}"`,
-        );
+        const targets = priorNodes.map((n) => `- ID: "${n.id}" | Tipo: ${n.type} | Propósito: "${n.purpose}"`);
         return targets.length ? `## Nodos disponibles como destino\n${targets.join('\n')}` : '';
       }
       default:
@@ -1117,22 +1227,14 @@ Llama al tool generate_node_config.`;
 
     for (const edge of skeleton.edges) {
       if (!nodeIds.has(edge.source)) {
-        throw new InternalServerErrorException({
-          message: `Edge con source "${edge.source}" no existe.`,
-        });
+        throw new InternalServerErrorException({ message: `Edge con source "${edge.source}" no existe.` });
       }
       if (!nodeIds.has(edge.target)) {
-        throw new InternalServerErrorException({
-          message: `Edge con target "${edge.target}" no existe.`,
-        });
+        throw new InternalServerErrorException({ message: `Edge con target "${edge.target}" no existe.` });
       }
     }
 
-    // Nodos lineales no deben tener edges con label
-    const LINEAR_TYPES: NodeType[] = [
-      'conversationNode', 'outputNode', 'storeNode',
-      'insertNode', 'inputNode', 'goToNode',
-    ];
+    const LINEAR_TYPES: NodeType[] = ['conversationNode', 'insertNode', 'inputNode', 'goToNode'];
     for (const edge of skeleton.edges) {
       if (edge.label) {
         const sourceNode = skeleton.nodes.find((n) => n.id === edge.source);
@@ -1140,7 +1242,7 @@ Llama al tool generate_node_config.`;
           throw new InternalServerErrorException({
             message:
               `El edge de "${edge.source}" (${sourceNode.type}) no debe tener label "${edge.label}". ` +
-              `Solo intentNode y confirmationNode generan edges con label.`,
+              `Solo intentNode, confirmationNode y storeNode (inline) generan edges con label.`,
           });
         }
       }
@@ -1148,20 +1250,27 @@ Llama al tool generate_node_config.`;
 
     for (const node of skeleton.nodes) {
       if (node.type === 'storeNode') {
-        if (!node.readsFrom) {
-          throw new InternalServerErrorException({
-            message: `storeNode "${node.id}" no tiene "readsFrom".`,
-          });
-        }
-        const target = skeleton.nodes.find((n) => n.id === node.readsFrom);
-        if (!target || target.type !== 'outputNode') {
-          throw new InternalServerErrorException({
-            message: `storeNode "${node.id}" apunta a "${node.readsFrom}" que no es un outputNode válido.`,
-          });
+        const mode = node.storeMode ?? 'inline';
+        const outgoing = skeleton.edges.filter((e) => e.source === node.id);
+        const incoming = skeleton.edges.filter((e) => e.target === node.id);
+
+        if (mode === 'floating') {
+          if (outgoing.length || incoming.length) {
+            throw new InternalServerErrorException({
+              message: `storeNode "${node.id}" es floating y no debe tener edges (encontrados: ${outgoing.length + incoming.length}).`,
+            });
+          }
+        } else {
+          const hasSuccess = outgoing.some((e) => e.label === 'success');
+          const hasEmpty   = outgoing.some((e) => e.label === 'empty');
+          if (!hasSuccess || !hasEmpty) {
+            throw new InternalServerErrorException({
+              message: `storeNode "${node.id}" (inline) debe tener exactamente 2 edges: label "success" y label "empty". Encontrado: ${outgoing.map((e) => e.label).join(', ')}.`,
+            });
+          }
         }
       }
 
-      // confirmationNode debe tener edge "yes" y edge "no"
       if (node.type === 'confirmationNode') {
         const outgoing = skeleton.edges.filter((e) => e.source === node.id);
         const hasYes = outgoing.some((e) => e.label === 'yes');
@@ -1169,6 +1278,18 @@ Llama al tool generate_node_config.`;
         if (!hasYes || !hasNo) {
           throw new InternalServerErrorException({
             message: `confirmationNode "${node.id}" debe tener exactamente 2 edges: label "yes" y label "no". Encontrado: ${outgoing.map((e) => e.label).join(', ')}.`,
+          });
+        }
+      }
+    }
+
+    // initStores/finishStores deben apuntar a storeNode floating existentes
+    for (const node of skeleton.nodes) {
+      for (const storeId of [...(node.initStores ?? []), ...(node.finishStores ?? [])]) {
+        const target = skeleton.nodes.find((n) => n.id === storeId);
+        if (!target || target.type !== 'storeNode' || (target.storeMode ?? 'inline') !== 'floating') {
+          throw new InternalServerErrorException({
+            message: `Nodo "${node.id}" referencia storeNodeId="${storeId}" en initStores/finishStores pero no es un storeNode floating válido.`,
           });
         }
       }

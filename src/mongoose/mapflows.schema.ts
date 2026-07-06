@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Types } from 'mongoose';
 
 export type MapflowDocument = MapflowModel & Document;
 
@@ -7,13 +7,14 @@ const NODE_TYPES = [
   'conversationNode',
   'intentNode',
   'inputNode',
-  'outputNode',
+
   'fallbackNode',
   'routerNode',
   'confirmationNode',
   'goToNode',
   'insertNode',   // ← nuevo
   'apiNode',      // ← nuevo
+   'storeNode', 
 ] as const;
 
 const EDGE_TYPES = ['default', 'fallback', 'jump'] as const;
@@ -82,6 +83,9 @@ class FormField {
 
 @Schema({ timestamps: true })
 export class MapflowModel {
+
+  _id?: Types.ObjectId | string;
+
   @Prop({ required: true })
   company_id!: string;
 

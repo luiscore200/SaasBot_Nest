@@ -1,17 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// session/session.service.ts  (v4 — activeGlobalStores)
+// session/session.service.ts  (v6 — lastFound por store, cache por schema)
 // ─────────────────────────────────────────────────────────────────────────────
 import { Injectable, Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import {
-  ChatSession,
-  BotRuntimeConfig,
-  ChannelType,
-  FormState,
-  OutputCache,
-  ActiveGlobalStore,
-  LLMMessage,
-  VisitedNodeEntry,
+  ChatSession, BotRuntimeConfig, ChannelType, FormState,
+  ActiveGlobalStore, LLMMessage, VisitedNodeEntry,
 } from '../engine.types';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -19,44 +13,27 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 @Injectable()
 export class SessionService {
   private readonly logger = new Logger(SessionService.name);
-
-  private readonly sessions    = new Map<string, ChatSession>();
+  private readonly sessions     = new Map<string, ChatSession>();
   private readonly visitorIndex = new Map<string, string>();
 
-  // ── Crear o recuperar ──────────────────────────────────────────────────────
-
-  getOrCreate(params: {
-    visitorId:  string;
-    channelId:  string;
-    channel:    ChannelType;
-    config:     BotRuntimeConfig;
-    sessionId?: string;
-  }): ChatSession {
+  getOrCreate(params: { visitorId: string; channelId: string; channel: ChannelType; config: BotRuntimeConfig; sessionId?: string; }): ChatSession {
     const { visitorId, channelId, channel, config, sessionId } = params;
 
     if (sessionId) {
       const existing = this.sessions.get(sessionId);
-      if (existing && !this.isExpired(existing)) {
-        this.touch(existing);
-        return existing;
-      }
+      if (existing && !this.isExpired(existing)) { this.touch(existing); return existing; }
     }
 
-    const indexKey   = this.buildKey(channelId, visitorId);
+    const indexKey = this.buildKey(channelId, visitorId);
     const existingId = this.visitorIndex.get(indexKey);
     if (existingId) {
       const existing = this.sessions.get(existingId);
-      if (existing && !this.isExpired(existing)) {
-        this.touch(existing);
-        return existing;
-      }
+      if (existing && !this.isExpired(existing)) { this.touch(existing); return existing; }
       this.visitorIndex.delete(indexKey);
     }
 
     return this.create({ visitorId, channelId, channel, config });
   }
-
-  // ── Mutaciones de formState ────────────────────────────────────────────────
 
   mergeFormState(sessionId: string, partial: FormState): void {
     const s = this.sessions.get(sessionId);
@@ -64,102 +41,62 @@ export class SessionService {
     s.formState = { ...s.formState, ...partial };
   }
 
-  
+  // ── OutputCache — por schemaId, dedup ──────────────────────────────────────
 
-  // ── OutputCache ────────────────────────────────────────────────────────────
-
-  appendOutputCache(sessionId: string, nodeId: string, docs: Record<string, any>[]): void {
+  appendOutputCache(sessionId: string, schemaId: string, docs: Record<string, any>[]): void {
     const s = this.sessions.get(sessionId);
     if (!s || !docs.length) return;
-    const existing = s.outputCache[nodeId] ?? [];
-    s.outputCache[nodeId] = [...existing, ...docs];
-    this.logger.log(
-      `[outputCache] sessionId="${sessionId}" nodeId="${nodeId}" ` +
-      `+${docs.length} docs → total=${s.outputCache[nodeId].length}`,
-    );
+    const existing = s.outputCache[schemaId] ?? [];
+    const existingIds = new Set(existing.map(d => String(d._id)));
+    const newDocs = docs.filter(d => !existingIds.has(String(d._id)));
+    if (!newDocs.length) return;
+    s.outputCache[schemaId] = [...existing, ...newDocs];
+    this.logger.log(`[outputCache] schemaId="${schemaId}" +${newDocs.length} → total=${s.outputCache[schemaId].length}`);
   }
 
-  getOutputCache(sessionId: string, nodeId: string): Record<string, any>[] {
-    const s = this.sessions.get(sessionId);
-    return s?.outputCache[nodeId] ?? [];
+  getOutputCache(sessionId: string, schemaId: string): Record<string, any>[] {
+    return this.sessions.get(sessionId)?.outputCache[schemaId] ?? [];
   }
 
   // ── activeGlobalStores ────────────────────────────────────────────────────
 
-  /**
-   * Registra un storeNode global en la sesión.
-   * Llamado cuando el flujo pasa por un storeNode con isGlobal: true.
-   * Si ya existe un store con el mismo nodeId, lo reemplaza (idempotente).
-   */
   registerGlobalStore(sessionId: string, store: ActiveGlobalStore): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    s.activeGlobalStores = [
-      ...s.activeGlobalStores.filter(st => st.nodeId !== store.nodeId),
-      store,
-    ];
-    this.logger.log(
-      `[globalStore] REGISTER sessionId="${sessionId}" nodeId="${store.nodeId}" ` +
-      `objectVar="${store.objectVar}" permissions=${store.permissions.join(',')}`,
-    );
+    s.activeGlobalStores = [...s.activeGlobalStores.filter(st => st.nodeId !== store.nodeId), store];
+    this.logger.log(`[globalStore] REGISTER nodeId="${store.nodeId}" objectVar="${store.objectVar}"`);
   }
 
-  /**
-   * Cierra un store global. Se llama cuando el flujo llega al closeNodeId.
-   * objectVar permanece en formState — solo se deja de interceptar.
-   */
   closeGlobalStore(sessionId: string, nodeId: string): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    const before = s.activeGlobalStores.length;
     s.activeGlobalStores = s.activeGlobalStores.filter(st => st.nodeId !== nodeId);
-    const after = s.activeGlobalStores.length;
-    if (before !== after) {
-      this.logger.log(
-        `[globalStore] CLOSE sessionId="${sessionId}" nodeId="${nodeId}" — ` +
-        `stores restantes=${after}`,
-      );
-    }
   }
 
-  /**
-   * Devuelve los stores globales activos de la sesión.
-   */
   getActiveGlobalStores(sessionId: string): ActiveGlobalStore[] {
     return this.sessions.get(sessionId)?.activeGlobalStores ?? [];
   }
 
-  // ── Historial ──────────────────────────────────────────────────────────────
-
-  pushTurn(
-    sessionId:          string,
-    userMsg:            string,
-    assistantMessages:  string | string[],
-    userMsgMeta?:       Partial<Pick<LLMMessage, 'interceptedBy' | 'storeAction'>>,
-  ): void {
+  /** Guarda el último resultado de búsqueda de un store — resuelve referencias
+   *  implícitas ("agrégalo", "cámbialo por esa") en turnos siguientes. */
+  updateStoreLastFound(sessionId: string, storeNodeId: string, docs: Record<string, any>[]): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    const idx = s.activeGlobalStores.findIndex(st => st.nodeId === storeNodeId);
+    if (idx === -1) return;
+    s.activeGlobalStores[idx] = { ...s.activeGlobalStores[idx], lastFound: docs };
+  }
 
-    const msgs     = Array.isArray(assistantMessages) ? assistantMessages : [assistantMessages];
+  // ── Historial ──────────────────────────────────────────────────────────────
+
+  pushTurn(sessionId: string, userMsg: string, assistantMessages: string | string[], userMsgMeta?: Partial<Pick<LLMMessage, 'interceptedBy' | 'storeAction'>>): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    const msgs = Array.isArray(assistantMessages) ? assistantMessages : [assistantMessages];
     const nonEmpty = msgs.filter(m => m?.trim());
 
-    this.logger.log(
-      `[pushTurn] sessionId="${sessionId}"\n` +
-      `  user      : "${userMsg}"\n` +
-      `  assistant : ${JSON.stringify(nonEmpty)}` +
-      (userMsgMeta?.interceptedBy ? `\n  interceptedBy: "${userMsgMeta.interceptedBy}"` : ''),
-    );
-
-    const userMessage: LLMMessage = {
-      role:    'user',
-      content: userMsg,
-      ...userMsgMeta,
-    };
-
-    s.history.push(userMessage);
-    if (nonEmpty.length > 0) {
-      s.history.push({ role: 'assistant', content: nonEmpty.join('\n\n') });
-    }
+    s.history.push({ role: 'user', content: userMsg, ...userMsgMeta });
+    if (nonEmpty.length > 0) s.history.push({ role: 'assistant', content: nonEmpty.join('\n\n') });
     s.turns += 1;
     this.touch(s);
   }
@@ -169,8 +106,6 @@ export class SessionService {
     if (!s) return;
     s.currentNodeId = nodeId;
   }
-
-  // ── Ciclo de vida ──────────────────────────────────────────────────────────
 
   get(sessionId: string): ChatSession | undefined {
     const s = this.sessions.get(sessionId);
@@ -184,40 +119,21 @@ export class SessionService {
     if (!s) return;
     this.visitorIndex.delete(this.buildKey(s.channelId, s.visitorId));
     this.sessions.delete(sessionId);
-    this.logger.log(`Sesión destruida sessionId="${sessionId}" canal="${s.channel}"`);
   }
 
   getStats() { return { activeSessions: this.sessions.size }; }
 
-  // ── Internals ──────────────────────────────────────────────────────────────
-
-  private create(p: {
-    visitorId: string; channelId: string;
-    channel: ChannelType; config: BotRuntimeConfig;
-  }): ChatSession {
-    const sessionId  = uuidv4();
-    const formState: FormState = Object.fromEntries(
-      p.config.formFields.map((f) => [f.name, null]),
-    );
+  private create(p: { visitorId: string; channelId: string; channel: ChannelType; config: BotRuntimeConfig; }): ChatSession {
+    const sessionId = uuidv4();
+    const formState: FormState = Object.fromEntries(p.config.formFields.map((f) => [f.name, null]));
     const session: ChatSession = {
-      sessionId,
-      visitorId:          p.visitorId,
-      channelId:          p.channelId,
-      channel:            p.channel,
-      company_id:         p.config.company_id,
-      config:             p.config,
-      history:            [],
-      formState,
-      outputCache:        {},
-      activeGlobalStores: [], // ← inicializado vacío
-      nodeHistory:        [],
-      currentNodeId:      p.config.startNode,
-      turns:              0,
-      lastActivity:       Date.now(),
+      sessionId, visitorId: p.visitorId, channelId: p.channelId, channel: p.channel,
+      company_id: p.config.company_id, config: p.config, history: [], formState,
+      outputCache: {}, activeGlobalStores: [], nodeHistory: [],
+      currentNodeId: p.config.startNode, turns: 0, lastActivity: Date.now(),
     };
     this.sessions.set(sessionId, session);
     this.visitorIndex.set(this.buildKey(p.channelId, p.visitorId), sessionId);
-    this.logger.log(`Sesión creada="${sessionId}" canal="${p.channel}" visitor="${p.visitorId}"`);
     return session;
   }
 
@@ -225,21 +141,9 @@ export class SessionService {
   private isExpired(s: ChatSession) { return Date.now() - s.lastActivity > SESSION_TTL_MS; }
   private touch(s: ChatSession) { s.lastActivity = Date.now(); }
 
-
-    // ── nodeHistory ────────────────────────────────────────────────────────────
-
-  /**
-   * Agrega una entrada a nodeHistory directamente sobre la sesión real en el
-   * Map interno — nunca sobre una copia local. runNodeChain reasigna `session`
-   * dentro de su loop (session = {...session, ...}), así que cualquier mutación
-   * hecha sobre ese objeto local después de la primera reasignación se pierde
-   * silenciosamente si no se escribe aquí.
-   */
   appendNodeHistory(sessionId: string, entry: VisitedNodeEntry): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.nodeHistory = [...s.nodeHistory, entry].slice(-30);
   }
-
-  
 }

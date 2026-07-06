@@ -22,6 +22,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { MapflowPatternService } from './mapflow/mapflowPattern.service';
 import { OllamaModule } from 'src/ollama/ollama.module';
+import { StoreEnrichmentService } from './mapflow/storeEnrichment.service';
+import { GroqModule } from 'src/groq/groq.module';
 
 
 
@@ -35,6 +37,7 @@ import { OllamaModule } from 'src/ollama/ollama.module';
     OllamaModule,
     AuthModule,
     PrismaModule,
+    GroqModule,
     ConfigModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -45,7 +48,8 @@ import { OllamaModule } from 'src/ollama/ollama.module';
   ],
   exports:[DocumentsService,SchemasService],
   controllers: [SchemasController,DocumentsController, MapflowController, ChatbotController, WidgetConfigController],
-  providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService   , MapflowPatternService, WidgetConfigService, CascadeService, WidgetCorsService],
+  providers: [ SchemasService, DtoService,DocumentsService, MapflowService, ChatbotService   , 
+    MapflowPatternService, WidgetConfigService, CascadeService, WidgetCorsService,StoreEnrichmentService],
 
 })
 export class DataModule {}

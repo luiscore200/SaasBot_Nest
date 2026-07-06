@@ -10,6 +10,7 @@ import { map } from 'rxjs/operators';
 import { MapflowAiQueueService } from './qeue.service';
 import { MapflowAiSseService } from './sse.service';
 import { MapflowInferenceService } from './infercence.service';
+import { CatalogLookupService } from './catalog.service';
 import { SchemasService } from '../data/schemas/schemas.service';
 import {
   CreateMapflowAiDto,
@@ -26,6 +27,7 @@ export class MapflowAiService implements OnModuleInit {
     private readonly sse: MapflowAiSseService,
     private readonly inference: MapflowInferenceService,
     private readonly schemas: SchemasService,
+    private readonly catalogLookup: CatalogLookupService,
   ) {}
 
   // ─── Registro del processor en la queue ───────────────────────────────────
@@ -140,6 +142,18 @@ export class MapflowAiService implements OnModuleInit {
         }
       }
 
+      // 1.5 Buscar referencia en el catálogo (best-effort, nunca bloquea el flujo)
+      const catalogMatch = await this.catalogLookup.findCompatiblePattern(
+        job.description,
+      );
+
+      if (catalogMatch) {
+        this.logger.log(
+          `[MapflowAiService] Catálogo compatible encontrado [${job.jobId}] — ` +
+            `mapflow="${catalogMatch.mapflowId}" score=${catalogMatch.score.toFixed(3)}`,
+        );
+      }
+
       // 2. Pipeline LLM
       this.sse.emit(companyId, {
         event: 'generating',
@@ -150,6 +164,7 @@ export class MapflowAiService implements OnModuleInit {
         job.name,
         job.description,
         existingSchemas,
+        catalogMatch,
       );
 
       // 2.5 Resolver referencias por nombre -> ObjectId
@@ -193,88 +208,68 @@ export class MapflowAiService implements OnModuleInit {
     }
   }
 
-  /**
-   * El LLM referencia los schemas por nombre.
-   * Este método sustituye dichos nombres por el ObjectId real cuando
-   * el schema ya existe en MongoDB.
-   *
-   * Los schemas inferidos permanecen con su nombre ya que todavía
-   * no existen y serán creados durante la confirmación.
-   */
-  private resolveSchemaReferences(
-    output: any,
-    existingSchemas: ExistingSchemaContext[],
-  ): void {
-    if (!existingSchemas.length) {
-      return;
-    }
+/**
+ * El LLM referencia los schemas por nombre.
+ * Este método sustituye dichos nombres por el ObjectId real cuando
+ * el schema ya existe en MongoDB.
+ *
+ * Los schemas inferidos permanecen con su nombre ya que todavía
+ * no existen y serán creados durante la confirmación.
+ */
+private resolveSchemaReferences(
+  output: any,
+  existingSchemas: ExistingSchemaContext[],
+): void {
+  if (!existingSchemas.length) {
+    return;
+  }
 
-    const nameToId = new Map<string, string>();
+  const nameToId = new Map<string, string>();
+  for (const schema of existingSchemas) {
+    nameToId.set(schema.name.trim().toLowerCase(), schema.id);
+  }
 
-    for (const schema of existingSchemas) {
-      nameToId.set(
-        schema.name.trim().toLowerCase(),
-        schema.id,
-      );
-    }
+  const resolve = (value?: string): string | undefined => {
+    if (!value) return value;
+    return nameToId.get(value.trim().toLowerCase()) ?? value;
+  };
 
-    const resolve = (
-      value?: string,
-    ): string | undefined => {
-      if (!value) {
-        return value;
-      }
+  for (const node of output.nodes) {
+    switch (node.type) {
+      case 'storeNode': {
+        const schemas = node.config?.schemas;
+        if (!Array.isArray(schemas)) break;
 
-      return (
-        nameToId.get(value.trim().toLowerCase()) ??
-        value
-      );
-    };
-
-    for (const node of output.nodes) {
-      switch (node.type) {
-        case 'outputNode': {
-          const schemes = node.config?.schemes;
-
-          if (!Array.isArray(schemes)) {
-            break;
-          }
-
-          for (const scheme of schemes) {
-            const previous = scheme.selectedSchema;
-            const resolved = resolve(previous);
-
-            if (previous !== resolved) {
-              this.logger.log(
-                `[MapflowAiService] outputNode "${node.id}": "${previous}" -> "${resolved}"`,
-              );
-            }
-
-            scheme.selectedSchema = resolved;
-          }
-
-          break;
-        }
-
-        case 'insertNode': {
-          if (!node.config) {
-            break;
-          }
-
-          const previous = node.config.selectedSchemaId;
-          const resolved = resolve(previous);
-
-          if (previous !== resolved) {
+        node.config.schemas = schemas.map((schemaName: string) => {
+          const resolved = resolve(schemaName);
+          if (schemaName !== resolved) {
             this.logger.log(
-              `[MapflowAiService] insertNode "${node.id}": "${previous}" -> "${resolved}"`,
+              `[MapflowAiService] storeNode "${node.id}": "${schemaName}" -> "${resolved}"`,
             );
           }
+          return resolved;
+        });
 
-          node.config.selectedSchemaId = resolved;
+        break;
+      }
 
-          break;
+      case 'insertNode': {
+        if (!node.config) break;
+
+        const previous = node.config.selectedSchemaId;
+        const resolved = resolve(previous);
+
+        if (previous !== resolved) {
+          this.logger.log(
+            `[MapflowAiService] insertNode "${node.id}": "${previous}" -> "${resolved}"`,
+          );
         }
+
+        node.config.selectedSchemaId = resolved;
+
+        break;
       }
     }
   }
+}
 }

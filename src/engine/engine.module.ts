@@ -25,7 +25,7 @@ import { EngineController } from './engine.controller';
 import { PersistenceService } from 'src/common/services/percistence/persistence.service';
 import { CommonModule } from 'src/common/common.module';
 import { QdrantModule } from 'src/qdrant/qdrant.module';
-import { DataResolverService } from './node/output/dataResolver.service';
+import { DataResolverService } from './node/store/dataResolver.service';
 import { OllamaModule } from 'src/ollama/ollama.module';
 import { GeminiModule } from 'src/gemini/gemini.module';
 import { DataModule } from 'src/data/data.module';
