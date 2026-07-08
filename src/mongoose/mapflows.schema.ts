@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Types } from 'mongoose';
 
 export type MapflowDocument = MapflowModel & Document;
 
@@ -82,6 +82,9 @@ class FormField {
 
 @Schema({ timestamps: true })
 export class MapflowModel {
+  _id?: Types.ObjectId | string;
+
+
   @Prop({ required: true })
   company_id!: string;
 
